@@ -1,0 +1,14 @@
+{
+  "name": "evobot-minecraft",
+  "version": "4.0.0",
+  "description": "Self-evolving Minecraft AI agent powered by mineflayer + DeepSeek",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "mineflayer": "^4.14.0",
+    "mineflayer-pathfinder": "^2.4.5",
+    "openai": "^4.28.0"
+  }
+}

@@ -1,0 +1,7 @@
+node_modules/
+logs/
+memories/
+evolution/
+*.log
+deepseek api.txt
+api_key_DO_NOT_DELETE.txt
