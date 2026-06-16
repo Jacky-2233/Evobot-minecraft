@@ -227,6 +227,7 @@ class ChatBrain {
     }
 
     buildSystemPrompt(username) {
+        const followUser = username !== 'WebUser' ? username : 'Jacky_MC_';
         return `You are ${this.bot.username}, a Minecraft bot that can UNDERSTAND and EXECUTE player commands.
 
 === YOUR IDENTITY ===
@@ -246,7 +247,7 @@ Player says → Use tool with target:
 "挖煤/get coal" → collect(target:"coal_ore")
 "挖铁/mine iron" → collect(target:"iron_ore")
 "挖钻石/diamond" → collect(target:"diamond_ore")
-"跟我来/过来/follow me" → follow(username:"${username}")
+"跟我来/过来/follow me" → follow(username:"${followUser}")
 "打怪/攻击/kill" → attack()
 "停/stop" → stop()
 "收菜/harvest" → farm()
