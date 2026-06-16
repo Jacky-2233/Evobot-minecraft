@@ -8,13 +8,17 @@ class GatherSkill {
     }
 
     async safeDig(block, timeoutMs = 5000) {
-        if (!block) return false;
+        if (!block || !block.position) return false;
+        const bp = block.position;
+        if (Number.isNaN(bp.x) || Number.isNaN(bp.y) || Number.isNaN(bp.z)) return false;
         await this.agent.skills.inventory.equipBestTool(block);
         let current = block;
         for (let i = 0; i < 5; i++) {
             try {
+                const pos = current.position;
+                if (Number.isNaN(pos.x) || Number.isNaN(pos.y) || Number.isNaN(pos.z)) return false;
                 await this.bot.dig(current);
-                const check = this.bot.blockAt(current.position);
+                const check = this.bot.blockAt(pos);
                 if (!check || check.name !== block.name) return true;
                 current = check;
             } catch (e) {

@@ -154,8 +154,11 @@ class Agent {
             if (!this.bot?.entity) return;
             const pos = this.bot.entity.position;
             if (Number.isNaN(pos.x) || Number.isNaN(pos.y) || Number.isNaN(pos.z)) {
-                this.log('[CRITICAL] Position NaN in update loop, reconnecting...');
-                this.bot.quit();
+                this.log('[CRITICAL] Position NaN — forcing reconnect');
+                this.cleanup();
+                if (this.config.bot.autoReconnect) {
+                    setTimeout(() => this.start(), this.config.bot.reconnectDelay);
+                }
                 return;
             }
 
