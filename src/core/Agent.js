@@ -65,6 +65,10 @@ class Agent {
     cleanup() {
         this.intervals.forEach(id => clearInterval(id));
         this.intervals = [];
+        // Close web server
+        try { this.dashboard?.server?.close(); } catch (e) {}
+        try { this.dashboard?.wss?.close(); } catch (e) {}
+        this.dashboard = null;
         if (this.bot) {
             try { this.bot.removeAllListeners(); } catch (e) {}
             try { this.bot.quit(); } catch (e) {}
@@ -81,8 +85,8 @@ class Agent {
         // Setup pathfinder movements
         const mcData = require('minecraft-data')(this.bot.version);
         const defaultMove = new Movements(this.bot, mcData);
-        defaultMove.canDig = true;
-        defaultMove.digCost = 1;
+        defaultMove.canDig = false;
+        defaultMove.digCost = 0;
         defaultMove.placeCost = 1;
         const originalSafe = defaultMove.safeToBreak;
         defaultMove.safeToBreak = (block) => {
@@ -94,9 +98,9 @@ class Agent {
         // Initialize skills
         this.skills.movement = new MovementSkill(this);
         this.skills.combat = new CombatSkill(this);
-        this.skills.combat.loadPlugin();
+        this.skills.combat.loadPlugin(); // PVP
         this.skills.survival = new SurvivalSkill(this);
-        this.skills.survival.loadPlugin();
+        this.skills.survival.loadPlugin(); // auto-eat
         this.skills.inventory = new InventorySkill(this);
         this.skills.gather = new GatherSkill(this);
         this.skills.farming = new FarmingSkill(this);
