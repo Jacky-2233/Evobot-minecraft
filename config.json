@@ -9,7 +9,7 @@
   },
   "ai": {
     "apiKey": "",
-    "apiKeyFile": "api_key_DO_NOT_DELETE.txt",
+    "apiKeyFile": "deepseek api.txt",
     "baseURL": "https://api.deepseek.com/v1",
     "model": "deepseek-chat",
     "maxHistory": 20,

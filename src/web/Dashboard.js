@@ -86,6 +86,26 @@ class Dashboard {
             return;
         }
 
+        if (parsed.pathname === '/api/talk' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', async () => {
+                try {
+                    const data = JSON.parse(body);
+                    const message = data.message;
+                    if (message && this.agent.bot?.entity && this.agent.chatBrain) {
+                        const reply = await this.agent.chatBrain.handleChat('WebUser', message);
+                        res.end(JSON.stringify({ ok: true, reply }));
+                    } else {
+                        res.end(JSON.stringify({ ok: false, error: 'Not ready or no message' }));
+                    }
+                } catch (e) {
+                    res.end(JSON.stringify({ ok: false, error: e.message }));
+                }
+            });
+            return;
+        }
+
         res.statusCode = 404;
         res.end(JSON.stringify({ error: 'Not found' }));
     }
@@ -150,9 +170,10 @@ class Dashboard {
         <div class="stat">Pos: <span id="pos">-</span></div>
     </div>
     <div class="card">
-        <h3>Chat</h3>
-        <input id="chatInput" placeholder="Send chat message">
-        <button onclick="sendChat()">Send</button>
+        <h3>Talk to EvoBot</h3>
+        <input id="chatInput" placeholder="Say something to the bot...">
+        <button onclick="talkToBot()">Talk</button>
+        <div id="conv" style="margin-top:8px;max-height:150px;overflow-y:auto;background:#000;padding:5px;font-size:12px;"></div>
     </div>
     <div class="card">
         <h3>Commands</h3>
@@ -196,10 +217,21 @@ class Dashboard {
             div.appendChild(p);
             div.scrollTop = div.scrollHeight;
         }
-        async function sendChat() {
+        async function talkToBot() {
             const input = document.getElementById('chatInput');
-            await fetch('/api/chat', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({message: input.value}) });
+            const msg = input.value.trim();
+            if (!msg) return;
+            const conv = document.getElementById('conv');
+            conv.innerHTML += '<div style="color:#0ff">You: ' + msg + '</div>';
             input.value = '';
+            const res = await fetch('/api/talk', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({message: msg}) });
+            const data = await res.json();
+            if (data.ok && data.reply) {
+                conv.innerHTML += '<div style="color:#0f0">EvoBot: ' + data.reply + '</div>';
+            } else if (!data.ok) {
+                conv.innerHTML += '<div style="color:#f88">Error: ' + (data.error || 'unknown') + '</div>';
+            }
+            conv.scrollTop = conv.scrollHeight;
         }
         async function sendCmd(text) {
             await fetch('/api/chat', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({command: text}) });
