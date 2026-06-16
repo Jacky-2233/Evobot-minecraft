@@ -73,21 +73,46 @@ class MovementSkill {
             { x: 0, y: 1, z: 0 }, { x: 0, y: -1, z: 0 }
         ];
 
+        // Breakable blocks: leaves, logs, grass, dirt, stone, deepslate, ores
+        const breakable = ['leaves', 'log', 'wood', 'stem', 'hyphae', 'grass', 'dirt', '_ore', 'stone', 'deepslate', 'cobblestone', 'tuff'];
+
         for (const dir of directions) {
             const block = bot.blockAt(pos.offset(dir.x, dir.y, dir.z));
-            if (block && (block.name.includes('leaves') || block.name.includes('log') || block.name === 'grass')) {
+            if (block && breakable.some(b => block.name.includes(b))) {
                 this.agent.log(`Breaking ${block.name}...`);
                 try {
+                    await this.agent.skills.inventory.equipBestTool(block);
                     bot.lookAt(block.position);
                     await this.agent.skills.gather.safeDig(block);
                 } catch (e) {}
             }
         }
 
-        bot.setControlState('jump', true);
-        await new Promise(r => setTimeout(r, 500));
-        bot.setControlState('jump', false);
-        await this.moveAway(3);
+        // If deep underground, prioritize going up
+        if (pos.y < 0) {
+            // Dig 2 blocks above
+            for (let up = 2; up <= 3; up++) {
+                const block = bot.blockAt(pos.offset(0, up, 0));
+                if (block && breakable.some(b => block.name.includes(b))) {
+                    try {
+                        await this.agent.skills.inventory.equipBestTool(block);
+                        bot.lookAt(block.position);
+                        await this.agent.skills.gather.safeDig(block);
+                    } catch (e) {}
+                }
+            }
+            // Jump and try to move to a higher position
+            bot.setControlState('jump', true);
+            await new Promise(r => setTimeout(r, 500));
+            bot.setControlState('jump', false);
+            // Move toward higher ground: try y+5
+            await this.gotoXYZ(pos.x, pos.y + 3, pos.z, 1, 3000);
+        } else {
+            bot.setControlState('jump', true);
+            await new Promise(r => setTimeout(r, 500));
+            bot.setControlState('jump', false);
+            await this.moveAway(3);
+        }
     }
 }
 

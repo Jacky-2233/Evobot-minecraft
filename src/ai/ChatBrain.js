@@ -151,7 +151,7 @@ class ChatBrain {
     }
 
     async handleChat(username, message) {
-        if (username === this.bot.username) return;
+        if (username === this.bot.username) return null;
         this.agent.log(`[Chat] <${username}> ${message}`);
 
         this.history.push({ role: 'user', name: username, content: message });
@@ -225,9 +225,11 @@ ${username} says: "${message}"`;
             if (this.history.length >= 6 && this.history.length % 6 === 0) {
                 this.archiveConversation(this.lastSystemPrompt);
             }
+            return reply || null;
         } catch (e) {
             this.agent.log('[AI] Error:', e.message || e);
             try { this.bot.chat('脑抽了...'); } catch (err) {}
+            return null;
         }
     }
 

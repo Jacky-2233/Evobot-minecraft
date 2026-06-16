@@ -206,7 +206,8 @@ class Agent {
             case 'follow': {
                 const player = bot.players[task.params.username]?.entity;
                 if (!player) return false;
-                await this.skills.movement.follow(player, 3, 5000);
+                // Follow for up to 30 seconds at a time
+                await this.skills.movement.follow(player, 3, 30000);
                 this.evolution.recordExperience('follow', task.params.username, true, 'Followed');
                 return true;
             }

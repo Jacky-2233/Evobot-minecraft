@@ -88,7 +88,7 @@ class ModeController {
                     this.stuckStart = Date.now();
                     return false;
                 }
-                const threshold = this.agent.taskQueue.currentTask ? 20000 : 60000;
+                const threshold = 15000; // Always 15s, regardless of task
                 if (Date.now() - this.stuckStart > threshold) {
                     this.agent.log('Stuck! Breaking out...');
                     this.setCooldown('unstuck', 5000);
@@ -190,9 +190,6 @@ class ModeController {
             priority: 0,
             update: async () => {
                 if (!this.agent.taskQueue.isIdle()) return false;
-
-                // Idle behaviors: look around, random wander
-                // Let task queue handle idle tasks instead
                 return false;
             }
         };
