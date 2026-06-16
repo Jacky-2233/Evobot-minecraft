@@ -5,6 +5,7 @@
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js",
+    "dash": "node dashboard-cli.js",
     "test": "node --check bot.js"
   },
   "dependencies": {

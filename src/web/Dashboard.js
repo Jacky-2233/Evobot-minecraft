@@ -118,9 +118,9 @@ class Dashboard {
             health: bot?.health ?? null,
             food: bot?.food ?? null,
             position: bot?.entity?.position ? {
-                x: bot.entity.position.x.toFixed(1),
-                y: bot.entity.position.y.toFixed(1),
-                z: bot.entity.position.z.toFixed(1),
+                x: Number.isNaN(bot.entity.position.x) ? '0' : bot.entity.position.x.toFixed(1),
+                y: Number.isNaN(bot.entity.position.y) ? '0' : bot.entity.position.y.toFixed(1),
+                z: Number.isNaN(bot.entity.position.z) ? '0' : bot.entity.position.z.toFixed(1),
             } : null,
             task: this.agent.taskQueue.getStatus(),
             inventory: this.agent.skills.inventory ? this.agent.skills.inventory.getStatus() : null,
