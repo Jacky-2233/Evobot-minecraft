@@ -3,5 +3,10 @@ logs/
 memories/
 evolution/
 *.log
+test_out.txt
+test_err.txt
+*.bak
+.claude/
+CLAUDE_CHAT.md
 deepseek api.txt
 api_key_DO_NOT_DELETE.txt

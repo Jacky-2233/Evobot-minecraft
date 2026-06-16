@@ -1,8 +1,8 @@
-# MC Bot 启动器 (PowerShell)
-$Host.UI.RawUI.WindowTitle = "MC Bot 启动器"
+# EvoBot v5.0 启动器 (PowerShell)
+$Host.UI.RawUI.WindowTitle = "EvoBot v5.0"
 
 Write-Host "==========================================" -ForegroundColor Cyan
-Write-Host "  MC Bot 启动器" -ForegroundColor Cyan
+Write-Host "  EvoBot v5.0 - Self-Evolving AI Agent" -ForegroundColor Cyan
 Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -14,22 +14,6 @@ try {
     Write-Host "[错误] 未检测到 Node.js，请先安装 Node.js" -ForegroundColor Red
     Read-Host "按回车键退出"
     exit 1
-}
-
-Write-Host ""
-
-# 检查 mineflayer
-if (-not (Test-Path "mineflayer")) {
-    Write-Host "[下载] 正在 clone mineflayer..." -ForegroundColor Yellow
-    git clone https://github.com/PrismarineJS/mineflayer.git mineflayer
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "[错误] clone 失败，请检查网络" -ForegroundColor Red
-        Read-Host "按回车键退出"
-        exit 1
-    }
-    Write-Host "[完成] mineflayer 已下载" -ForegroundColor Green
-} else {
-    Write-Host "[检查] mineflayer 已存在" -ForegroundColor Green
 }
 
 Write-Host ""
@@ -49,27 +33,10 @@ if (-not (Test-Path "node_modules")) {
 
 Write-Host ""
 Write-Host "==========================================" -ForegroundColor Cyan
-Write-Host "  选择要启动的机器人:" -ForegroundColor Cyan
+Write-Host "  准备启动 EvoBot v5.0" -ForegroundColor Cyan
 Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "  1 - 启动 EvoBot v4.0" -ForegroundColor White
-Write-Host "  2 - 退出" -ForegroundColor White
-Write-Host ""
 
-$choice = Read-Host "请输入数字 (1-2)"
-
-switch ($choice) {
-    "1" {
-        Write-Host "[启动] EvoBot v4.0..." -ForegroundColor Green
-        node bot.js
-    }
-    "2" {
-        Write-Host "[退出] 再见!" -ForegroundColor Yellow
-        exit 0
-    }
-    default {
-        Write-Host "[错误] 无效选择" -ForegroundColor Red
-    }
-}
+node bot.js
 
 Read-Host "按回车键退出"

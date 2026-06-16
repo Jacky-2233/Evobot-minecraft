@@ -3,7 +3,7 @@ title MC Bot - EvoBot Agent
 color 0A
 
 echo ==========================================
-echo   MC Bot - Self-Evolving Agent
+echo   EvoBot v5.0 - Self-Evolving AI Agent
 echo ==========================================
 echo.
 
@@ -32,7 +32,8 @@ echo   Launching EvoBot Agent...
 echo ==========================================
 echo.
 echo Server: 127.0.0.1:25565
-echo Version: 1.20.6
+echo Version: 1.20.1
+echo Edit config.json to change settings.
 echo.
 
 node bot.js
