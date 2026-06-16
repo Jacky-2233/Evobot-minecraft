@@ -297,13 +297,40 @@ class Agent {
             case 'status':
                 this.log(this.dashboard?.getStatus() || 'No status');
                 break;
+            case 'model':
+                if (args.length > 0) {
+                    this.setModel(args[0]);
+                } else {
+                    this.log(`Current model: ${this.config.ai.model}`);
+                    this.log(`Base URL: ${this.config.ai.baseURL}`);
+                }
+                break;
             case 'quit':
                 this.bot?.quit();
                 process.exit(0);
                 break;
             default:
-                this.log('Commands: say <msg>, follow <player>, collect <block> [count], attack, farm, build, deposit [items...], stop, status, quit');
+                this.log('Commands: say <msg>, follow <player>, collect <block> [count], attack, farm, build, deposit [items...], stop, status, model [name], quit');
         }
+    }
+
+    setModel(modelId) {
+        this.config.ai.model = modelId;
+        // Re-create OpenAI client with new config
+        this.openai = new OpenAI({
+            apiKey: this.config.ai.apiKey,
+            baseURL: this.config.ai.baseURL,
+        });
+        // Also update chatBrain's reference
+        if (this.chatBrain) {
+            this.chatBrain.openai = this.openai;
+        }
+        this.log(`[Config] Switched to model: ${modelId}`);
+        try {
+            const { saveConfig } = require('./Config');
+            saveConfig(this.config);
+        } catch (e) {}
+        return modelId;
     }
 }
 
