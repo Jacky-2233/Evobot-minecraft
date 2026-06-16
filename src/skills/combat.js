@@ -1,4 +1,5 @@
 const world = require('../utils/world');
+const { GoalNear } = require('mineflayer-pathfinder').goals;
 
 const WEAPON_ORDER = ['netherite_sword', 'diamond_sword', 'iron_sword', 'stone_sword', 'wooden_sword', 'netherite_axe', 'diamond_axe', 'iron_axe', 'stone_axe', 'wooden_axe'];
 const ARMOR_ORDER = ['helmet', 'chestplate', 'leggings', 'boots'];
@@ -103,7 +104,10 @@ class CombatSkill {
                 this.pvp.stop();
             } else {
                 await this.bot.pathfinder.goto(new GoalNear(entity.position.x, entity.position.y, entity.position.z, 2));
-                this.bot.lookAt(entity.position.offset(0, entity.height * 0.5, 0));
+                const lookTarget = entity.position.offset(0, entity.height * 0.5, 0);
+                if (!Number.isNaN(lookTarget.x) && !Number.isNaN(lookTarget.y) && !Number.isNaN(lookTarget.z)) {
+                    this.bot.lookAt(lookTarget);
+                }
                 this.bot.attack(entity);
             }
             return true;

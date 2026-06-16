@@ -1,10 +1,15 @@
 function getNearestEntityWhere(bot, predicate, maxDistance = 16) {
     let nearest = null;
     let minDist = maxDistance;
+    const myPos = bot.entity.position;
+    if (Number.isNaN(myPos.x) || Number.isNaN(myPos.y) || Number.isNaN(myPos.z)) return null;
     for (const entity of Object.values(bot.entities)) {
         if (entity === bot.entity) continue;
         if (!entity.position) continue;
-        const dist = entity.position.distanceTo(bot.entity.position);
+        const ep = entity.position;
+        if (Number.isNaN(ep.x) || Number.isNaN(ep.y) || Number.isNaN(ep.z)) continue;
+        const dist = ep.distanceTo(myPos);
+        if (Number.isNaN(dist)) continue;
         if (dist < minDist && predicate(entity)) {
             minDist = dist;
             nearest = entity;
