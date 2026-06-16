@@ -13,6 +13,9 @@ class MovementSkill {
     }
 
     async gotoXYZ(x, y, z, distance = 1, timeoutMs = 10000) {
+        if (Number.isNaN(x) || Number.isNaN(y) || Number.isNaN(z)) return false;
+        const pos = this.bot.entity.position;
+        if (Number.isNaN(pos.x) || Number.isNaN(pos.y) || Number.isNaN(pos.z)) return false;
         try {
             await Promise.race([
                 this.bot.pathfinder.goto(new GoalNear(x, y, z, distance)),

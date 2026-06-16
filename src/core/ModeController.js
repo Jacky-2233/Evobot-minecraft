@@ -162,21 +162,24 @@ class ModeController {
             failCount: 0,
             update: async () => {
                 if (!this.agent.taskQueue.isIdle()) return false;
+                // Backoff on repeated failures
                 if (this.failCount > 3) {
                     if (!this.itemCooldown) this.itemCooldown = Date.now() + 30000;
                     if (Date.now() < this.itemCooldown) return false;
                     this.failCount = 0;
                     this.itemCooldown = null;
                 }
-                const item = world.getNearestEntityWhere(this.bot, e => e.name === 'item', 8);
+                const item = world.getNearestEntityWhere(this.bot, e => e.name === 'item', 6);
                 if (item && this.bot.inventory.emptySlotCount() > 1) {
                     this.agent.log('Picking up item!');
-                    const reached = await this.agent.skills.movement.goto(item.position, 1, 5000);
+                    const reached = await this.agent.skills.movement.goto(item.position, 1, 4000);
                     if (!reached) {
                         this.failCount++;
+                        this.setCooldown('item_collecting', 3000); // fail cooldown
                     } else {
                         this.failCount = 0;
                     }
+                    this.setCooldown('item_collecting', reached ? 500 : 3000);
                     return true;
                 }
                 return false;
@@ -197,10 +200,18 @@ class ModeController {
 
     async update() {
         for (const mode of this.modes) {
+            if (mode._running) continue;
+            if (this.isOnCooldown(mode.name)) continue;
+            mode._running = true;
             try {
                 const triggered = await mode.update();
-                if (triggered) return mode.name;
+                mode._running = false;
+                if (triggered) {
+                    this.setCooldown(mode.name, 1000);
+                    return mode.name;
+                }
             } catch (e) {
+                mode._running = false;
                 this.agent.log(`[Mode ${mode.name}] Error:`, e.message);
             }
         }

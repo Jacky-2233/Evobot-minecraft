@@ -152,6 +152,12 @@ class Agent {
 
         this.intervals.push(setInterval(async () => {
             if (!this.bot?.entity) return;
+            const pos = this.bot.entity.position;
+            if (Number.isNaN(pos.x) || Number.isNaN(pos.y) || Number.isNaN(pos.z)) {
+                this.log('[CRITICAL] Position NaN in update loop, reconnecting...');
+                this.bot.quit();
+                return;
+            }
 
             // Survival check
             await this.skills.survival.eatIfNeeded();
