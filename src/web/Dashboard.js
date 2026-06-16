@@ -71,6 +71,28 @@ class Dashboard {
             return;
         }
 
+        if (parsed.pathname === '/api/config' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', () => {
+                try {
+                    const data = JSON.parse(body);
+                    if (data.model) {
+                        this.agent.setModel(data.model);
+                    }
+                    if (data.baseURL) {
+                        this.agent.config.ai.baseURL = data.baseURL;
+                        this.agent.openai.baseURL = data.baseURL;
+                        this.agent.log(`[Config] Base URL updated: ${data.baseURL}`);
+                    }
+                    res.end(JSON.stringify({ ok: true, model: this.agent.config.ai.model, baseURL: this.agent.config.ai.baseURL }));
+                } catch (e) {
+                    res.end(JSON.stringify({ ok: false, error: e.message }));
+                }
+            });
+            return;
+        }
+
         if (parsed.pathname === '/api/task' && req.method === 'POST') {
             let body = '';
             req.on('data', chunk => body += chunk);
@@ -185,6 +207,16 @@ class Dashboard {
         <button onclick="sendCmd('stop')">Stop</button>
     </div>
     <div class="card">
+        <h3>AI Model</h3>
+        <select id="modelSelect" onchange="changeModel(this.value)">
+            <option value="deepseek-chat">DeepSeek Chat</option>
+            <option value="deepseek-v4-flash">DeepSeek Flash</option>
+            <option value="deepseek-v4-pro">DeepSeek Pro</option>
+            <option value="moonshot-v1-8k">Kimi (Moonshot)</option>
+        </select>
+        <span id="modelStatus" style="margin-left:10px;font-size:12px;color:#888;"></span>
+    </div>
+    <div class="card">
         <h3>Tasks</h3>
         <div id="tasks">No tasks</div>
     </div>
@@ -235,6 +267,12 @@ class Dashboard {
         }
         async function sendCmd(text) {
             await fetch('/api/chat', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({command: text}) });
+        }
+        async function changeModel(val) {
+            const res = await fetch('/api/config', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({model: val}) });
+            const data = await res.json();
+            document.getElementById('modelStatus').textContent = data.ok ? '✓ ' + data.model : '✗ error';
+            setTimeout(() => document.getElementById('modelStatus').textContent = '', 3000);
         }
     </script>
 </body>

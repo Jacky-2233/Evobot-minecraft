@@ -93,6 +93,7 @@ function helpText() {
     console.log('  ' + C.yellow + '/build' + C.reset + '     Build shelter');
     console.log('  ' + C.yellow + '/deposit' + C.reset + '   Deposit items to chest');
     console.log('  ' + C.yellow + '/help' + C.reset + '      Show this help');
+    console.log('  ' + C.yellow + '/model <x>' + C.reset + ' Switch AI model (deepseek-chat/flash/pro)');
     console.log('  ' + C.yellow + '/quit' + C.reset + '      Exit');
     console.log('');
     console.log(C.dim + '  Or just type a message to chat with the bot...' + C.reset);
@@ -172,6 +173,15 @@ async function main() {
                 case 'help':
                     helpText();
                     break;
+                case 'model': {
+                    const m = arg || 'deepseek-chat';
+                    try {
+                        const res = await api('/api/config', 'POST', { model: m });
+                        if (res.ok) console.log(C.green + `  ✓ Switched to ${res.model}` + C.reset);
+                        else console.log(C.red + '  ✗ Failed to switch model' + C.reset);
+                    } catch (e) { console.log(C.red + '  ✗ ' + e.message + C.reset); }
+                    break;
+                }
                 default:
                     console.log(C.red + `  Unknown command: /${cmd}` + C.reset);
                     console.log(C.dim + '  Type /help for commands' + C.reset);

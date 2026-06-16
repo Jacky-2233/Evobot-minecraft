@@ -5,13 +5,23 @@
     "username": "EvoBot",
     "version": "1.20.1",
     "password": "",
-    "auth": "offline"
+    "auth": "offline",
+    "plugins": {},
+    "hideErrors": false,
+    "logErrors": true,
+    "loadInternalPlugins": true,
+    "client": null,
+    "brand": "vanilla",
+    "respawn": true,
+    "validateChannelProtocol": false,
+    "majorVersion": "1.20",
+    "protocolVersion": 763
   },
   "ai": {
-    "apiKey": "",
+    "apiKey": "YOUR_DEEPSEEK_API_KEY_HERE",
     "apiKeyFile": "deepseek api.txt",
     "baseURL": "https://api.deepseek.com/v1",
-    "model": "deepseek-chat",
+    "model": "deepseek-v4-flash",
     "maxHistory": 20,
     "replyTimeout": 15000,
     "maxTokens": 200
@@ -29,7 +39,14 @@
     "hungerThreshold": 16,
     "lowHealthThreshold": 8,
     "criticalHealthThreshold": 4,
-    "trashItems": ["dirt", "cobblestone", "gravel", "sand", "rotten_flesh", "stick"]
+    "trashItems": [
+      "dirt",
+      "cobblestone",
+      "gravel",
+      "sand",
+      "rotten_flesh",
+      "stick"
+    ]
   },
   "evolution": {
     "enabled": true
