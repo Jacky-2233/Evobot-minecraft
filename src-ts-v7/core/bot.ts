@@ -1,6 +1,8 @@
 import mineflayer, { Bot } from 'mineflayer';
 import { pathfinder } from 'mineflayer-pathfinder';
 import autoeat from 'mineflayer-auto-eat';
+import fs from 'fs';
+import path from 'path';
 import { MoveToSkill, type MoveParams } from '../skills/movement.js';
 import { CollectSkill, type CollectParams } from '../skills/collect.js';
 import { EatSkill } from '../skills/eat.js';
@@ -22,6 +24,7 @@ export class EvoBotV7 {
     private _reconnectAttempts = 0;
     private _inWater = false;
     private _lastEvent = '';
+    private _logDir = 'logs';
 
     constructor(config: BotConfig) {
         this.config = config;
@@ -43,6 +46,14 @@ export class EvoBotV7 {
     }
 
     private register(s: AnySkill): void { this.skills.set(s.name, s); }
+
+    private _log(filename: string, data: Record<string, unknown>): void {
+        try {
+            const dir = path.join(process.cwd(), this._logDir);
+            if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+            fs.appendFileSync(path.join(dir, filename), JSON.stringify({ ts: Date.now(), ...data }) + '\n');
+        } catch {}
+    }
 
     private setupEvents(): void {
         this.bot.once('spawn', () => this.onSpawn());
@@ -179,6 +190,8 @@ Choose wisely based on state. Prioritize: survival > tools > resources > explore
             { role: 'user', content: prompt },
         ], { maxTokens: 150, temperature: 0.3 });
 
+        this._log('think.jsonl', { type: 'decision', prompt, reply, hp, fd, posStr });
+
         if (!reply) return { type: 'wait', params: {} };
         try {
             const j = JSON.parse(reply);
@@ -194,6 +207,7 @@ Choose wisely based on state. Prioritize: survival > tools > resources > explore
 
     private async thinkAndChat(username: string, message: string): Promise<void> {
         const p = this.bot.entity?.position;
+        this._log('chat.jsonl', { type: 'user', username, message, pos: p ? { x: p.x, y: p.y, z: p.z } : null });
         const prompt = `You are a Minecraft bot. Reply in 1 sentence.
 HP=${this.bot.health?.toFixed(0)} Food=${this.bot.food?.toFixed(0)} Pos=(${p?.x.toFixed(0) ?? '?'},${p?.y.toFixed(0) ?? '?'},${p?.z.toFixed(0) ?? '?'})
 Player <${username}>: "${message}"`;
@@ -201,7 +215,11 @@ Player <${username}>: "${message}"`;
             { role: 'system', content: 'You are a friendly Minecraft bot. Reply in 1 short sentence.' },
             { role: 'user', content: prompt },
         ], { maxTokens: 80, temperature: 0.8 });
-        if (reply) { this.bot.chat(reply); console.log(`[V7] <${reply}>`); }
+        if (reply) {
+            this.bot.chat(reply);
+            console.log(`[V7] <${reply}>`);
+            this._log('chat.jsonl', { type: 'bot_reply', to: username, reply, prompt });
+        }
     }
 
     private async runSkill(type: string, params: any): Promise<SkillResult> {
