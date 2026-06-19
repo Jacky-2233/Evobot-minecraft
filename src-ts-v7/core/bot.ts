@@ -109,17 +109,21 @@ export class EvoBotV7 {
         this.running = true;
         this._reconnectAttempts = 0;
 
-        const mcData = require('minecraft-data')(this.bot.version);
+        const registry = this.bot.registry;
+        if (!registry) {
+            console.error('[V7] bot.registry is null, cannot configure pathfinder');
+            return;
+        }
         const { Movements } = require('mineflayer-pathfinder');
-        const moves = new Movements(this.bot, mcData);
+        const moves = new Movements(this.bot);
         moves.canDig = false;
         moves.allowParkour = false;
         moves.allowSprinting = false; // less overshoot near edges/water
         moves.liquidCost = 100; // strongly discourage paths through water
         moves.infiniteLiquidDropdownDistance = false; // don't drop into water from height
         // Avoid walking into water/lava
-        const water = mcData.blocksByName['water']?.id;
-        const lava = mcData.blocksByName['lava']?.id;
+        const water = registry.blocksByName['water']?.id;
+        const lava = registry.blocksByName['lava']?.id;
         if (water) moves.blocksToAvoid.add(water);
         if (lava) moves.blocksToAvoid.add(lava);
         this.bot.pathfinder.setMovements(moves);
