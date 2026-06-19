@@ -114,6 +114,11 @@ export class EvoBotV7 {
         const moves = new Movements(this.bot, mcData);
         moves.canDig = false;
         moves.allowParkour = false;
+        // Avoid walking into water/lava
+        const water = mcData.blocksByName['water']?.id;
+        const lava = mcData.blocksByName['lava']?.id;
+        if (water) moves.blocksToAvoid.add(water);
+        if (lava) moves.blocksToAvoid.add(lava);
         this.bot.pathfinder.setMovements(moves);
 
         try {
@@ -143,20 +148,24 @@ export class EvoBotV7 {
 
         // ── Safety (hardcoded, no AI) ──
         const feet = this.bot.blockAt(pos);
-        const water = feet && (feet.name?.includes('water') ?? false);
-        if (water && !this._inWater) {
-            this._inWater = true;
-            console.warn('[V7] In water — escaping');
-            this.bot.pathfinder?.stop();
-            this.bot.clearControlStates();
-            const land = this.findLand(10);
-            const GN = getGoalNear();
-            if (land && GN) {
-                this.bot.pathfinder.goto(new GN(land.x, land.y, land.z, 2)).catch(() => {});
+        const head = this.bot.blockAt(pos.offset(0, 1, 0));
+        const inWater = (feet?.name?.includes('water') ?? false) || (head?.name?.includes('water') ?? false);
+        if (inWater) {
+            if (!this._inWater) {
+                this._inWater = true;
+                console.warn('[V7] In water — swimming up');
+                this.bot.pathfinder?.stop();
             }
+            // Swim up until head is above water
+            this.bot.setControlState('jump', true);
+            try { this.bot.look(this.bot.entity.yaw, -Math.PI / 2, true); } catch {}
             return;
         }
-        this._inWater = false;
+        if (this._inWater) {
+            this._inWater = false;
+            this.bot.setControlState('jump', false);
+            console.log('[V7] Out of water');
+        }
 
         const health = this.bot.health ?? 20;
         if (health <= this.config.criticalHealthThreshold) {
