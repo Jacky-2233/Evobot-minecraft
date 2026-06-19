@@ -166,6 +166,23 @@ summary{cursor:pointer;color:#58a6ff}
       <span class="tag" id="survPH">--</span></div>
   </div>
 
+  <!-- Current Goal -->
+  <div class="card">
+    <h2>🎯 Current Goal</h2>
+    <div class="row"><span class="dim">Goal</span><span class="val" id="goalDesc">none</span></div>
+    <div class="row"><span class="dim">Type</span><span class="val" id="goalType">--</span></div>
+    <div class="row"><span class="dim">Pending</span><span class="val" id="goalPending">0</span></div>
+    <details><summary>Queue</summary><div id="goalQueue" style="font-size:11px;color:#8b949e;margin-top:4px">--</div></details>
+  </div>
+
+  <!-- Control State -->
+  <div class="card">
+    <h2>🔒 Control</h2>
+    <div class="row"><span class="dim">Owner</span><span class="val" id="ctrlOwner">none</span></div>
+    <div class="row"><span class="dim">Last Interrupt</span><span class="val" id="ctrlInterrupt" style="font-size:11px">--</span></div>
+    <div class="row"><span class="dim">Force Acquire</span><span class="val" id="ctrlForceAcq" style="font-size:11px">--</span></div>
+  </div>
+
   <!-- Current Task -->
   <div class="card">
     <h2>📋 Current Task</h2>
@@ -251,6 +268,22 @@ function render(s) {
   document.getElementById('taskSkill').textContent = s.task.currentSkill || 'idle';
   document.getElementById('taskGoal').textContent = s.task.currentGoal || '--';
   document.getElementById('taskRecover').textContent = s.task.recovering ? 'YES' : 'no';
+
+  // Goal
+  if (s.goal) {
+    document.getElementById('goalDesc').textContent = s.goal.activeDescription || 'none';
+    document.getElementById('goalType').textContent = s.goal.activeType || '--';
+    document.getElementById('goalPending').textContent = s.goal.pendingCount || '0';
+    const qDiv = document.getElementById('goalQueue');
+    qDiv.innerHTML = (s.goal.queue || []).map(g => '<div>' + esc(g.type) + ': ' + esc(g.description) + '</div>').join('') || '--';
+  }
+
+  // Control
+  if (s.control) {
+    document.getElementById('ctrlOwner').textContent = s.control.owner || 'none';
+    document.getElementById('ctrlInterrupt').textContent = s.control.lastInterruptReason || 'none';
+    document.getElementById('ctrlForceAcq').textContent = s.control.lastForceAcquireReason || 'none';
+  }
 
   // Checkpoint
   document.getElementById('ckExists').textContent = s.checkpoint.exists ? '✓ Yes' : '✗ No';

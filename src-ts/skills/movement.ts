@@ -2,9 +2,9 @@
  * Movement Skill
  *
  * Wraps mineflayer-pathfinder with safety: NaN check, stuck guard, pathfinding.
+ * Handles server disconnects gracefully — resolves rather than path_stuck.
  */
 import type { Bot } from 'mineflayer';
-import path from 'path';
 import { BaseSkill } from './base.js';
 import { SkillResult, SkillContext, Vec3 } from '../types/index.js';
 import { nanTracer } from '../utils/nan-guard.js';
@@ -12,12 +12,16 @@ import { nanTracer } from '../utils/nan-guard.js';
 // Dynamic import for mineflayer-pathfinder (CJS module in ESM context)
 let GoalNear: any;
 let Movements: any;
-try {
-    const pf = require('mineflayer-pathfinder');
-    GoalNear = pf.goals.GoalNear;
-    Movements = pf.Movements;
-} catch {
-    // will be lazy-loaded on first execute
+let pfLoaded = false;
+
+function loadPf(): void {
+    if (pfLoaded) return;
+    try {
+        const pf = require('mineflayer-pathfinder');
+        GoalNear = pf.goals.GoalNear;
+        Movements = pf.Movements;
+        pfLoaded = true;
+    } catch {}
 }
 
 export interface MoveParams {
@@ -52,15 +56,21 @@ export class MoveToSkill extends BaseSkill<MoveParams> {
             return this.result(false, 'Target coordinates are NaN', 'not_possible');
         }
         const pos = this.bot.entity.position;
-        if (Number.isNaN(pos.x) || Number.isNaN(pos.y) || Number.isNaN(pos.z)) {
-            return this.result(false, 'Bot position is NaN — need reconnect', 'internal_error');
+        if (!pos || Number.isNaN(pos.x) || Number.isNaN(pos.y) || Number.isNaN(pos.z)) {
+            return this.result(false, 'Bot position is NaN', 'internal_error');
         }
 
-        // Load pathfinder movements once
-        if (!GoalNear || !Movements) {
-            const pf = require('mineflayer-pathfinder');
-            GoalNear = pf.goals.GoalNear;
-            Movements = pf.Movements;
+        // Already there?
+        const dist = Math.sqrt(
+            (pos.x - x) ** 2 + (pos.y - y) ** 2 + (pos.z - z) ** 2,
+        );
+        if (dist <= reachDistance + 0.5) {
+            return this.result(true, `Already at (${x.toFixed(0)}, ${y.toFixed(0)}, ${z.toFixed(0)})`);
+        }
+
+        loadPf();
+        if (!GoalNear) {
+            return this.result(false, 'Pathfinder not loaded', 'internal_error');
         }
 
         const mcData = require('minecraft-data')(this.bot.version);
@@ -72,64 +82,72 @@ export class MoveToSkill extends BaseSkill<MoveParams> {
         nanTracer.trace('move_to.setGoal', { x, y, z, pos: this.bot.entity.position });
 
         return new Promise<SkillResult>((resolve) => {
-            const onDone = () => {
+            let settled = false;
+
+            const finish = (ok: boolean, detail: string, failureType?: string) => {
+                if (settled) return;
+                settled = true;
                 cleanup();
-                resolve(this.result(true, `Reached (${x.toFixed(0)}, ${y.toFixed(0)}, ${z.toFixed(0)})`));
+                try { this.bot.pathfinder.stop(); } catch {}
+                resolve(this.result(ok, detail, failureType as any));
             };
-            const onError = (err: Error) => {
-                cleanup();
-                resolve(this.result(false, err.message, 'path_stuck'));
-            };
+
             const cleanup = () => {
                 this.bot.removeListener('goal_reached', onDone);
                 this.bot.removeListener('path_update', onStalled);
+                this.bot.removeListener('end', onDisconnect);
+            };
+
+            const onDone = () => {
+                finish(true, `Reached (${x.toFixed(0)}, ${y.toFixed(0)}, ${z.toFixed(0)})`);
+            };
+
+            const onDisconnect = () => {
+                finish(false, 'Disconnected during movement', 'cancelled');
             };
 
             // Stalled detection
             let lastPos = pos.clone();
             const onStalled = () => {
+                if (!this.bot.entity) return;
                 const d = this.bot.entity.position.distanceTo(lastPos);
                 if (d > 0.3) lastPos = this.bot.entity.position.clone();
             };
 
-            // Timeout (ctx.deadline)
+            // Timeout
             const deadlineTimer = setInterval(() => {
                 if (Date.now() > ctx.deadline) {
-                    cleanup();
-                    this.bot.pathfinder.stop();
-                    this.bot.clearControlStates();
-                    resolve(this.result(false, 'Movement timeout', 'timeout'));
+                    finish(false, 'Movement timeout', 'timeout');
                 }
             }, 500);
 
-            // Check for NaN during movement
+            // NaN guard during movement
             const nanChecker = setInterval(() => {
-                const p = this.bot.entity.position;
-                if (Number.isNaN(p.x) || Number.isNaN(p.y) || Number.isNaN(p.z)) {
-                    cleanup();
-                    clearInterval(deadlineTimer);
-                    this.bot.pathfinder.stop();
-                    resolve(this.result(false, 'Got NaN during movement', 'internal_error'));
+                const p = this.bot.entity?.position;
+                if (!p || Number.isNaN(p.x) || Number.isNaN(p.y) || Number.isNaN(p.z)) {
+                    finish(false, 'Got NaN during movement', 'internal_error');
                 }
             }, 300);
 
             this.bot.once('goal_reached', onDone);
             this.bot.on('path_update', onStalled);
+            this.bot.once('end', onDisconnect);
 
             this.bot.pathfinder.goto(goal as any).catch((err: Error) => {
-                onError(err);
+                if (!settled) {
+                    const msg = err.message;
+                    if (msg.includes('disconnect') || msg.includes('end') || msg.includes('reset')) {
+                        finish(false, 'Disconnected', 'cancelled');
+                    } else {
+                        finish(false, msg, 'path_stuck');
+                    }
+                }
             });
 
-            // Also handle abort signal
             ctx.signal.addEventListener(
                 'abort',
                 () => {
-                    cleanup();
-                    clearInterval(deadlineTimer);
-                    clearInterval(nanChecker);
-                    this.bot.pathfinder.stop();
-                    this.bot.clearControlStates();
-                    resolve(this.result(false, 'Cancelled', 'cancelled'));
+                    finish(false, 'Cancelled', 'cancelled');
                 },
                 { once: true },
             );

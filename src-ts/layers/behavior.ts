@@ -128,9 +128,13 @@ export interface BehaviorDeps {
     perception: Perception;
     memory: Memory;
     executor: Executor;
+    /** Submit a task intent to the orchestrator (not direct executor) */
+    submitTask: (task: { type: string; params: Record<string, unknown>; priority: number }) => void;
+    /** Hunger threshold for auto-eat (from config) */
+    hungerThreshold?: number;
 }
 
-/** Wander randomly when idle */
+/** Wander randomly when idle (short range for 8s connection window) */
 export function createWanderBehavior(deps: BehaviorDeps): BehaviorNode {
     return {
         name: 'wander',
@@ -140,30 +144,76 @@ export function createWanderBehavior(deps: BehaviorDeps): BehaviorNode {
         },
         tick: async () => {
             const pos = deps.bot.entity.position;
-            const rx = pos.x + (Math.random() * 20 - 10);
-            const rz = pos.z + (Math.random() * 20 - 10);
-            const ground = deps.bot.blockAt(
-                deps.bot.entity.position.floored().offset(0, -1, 0),
-            );
-            const y = ground ? ground.position.y + 1 : pos.y;
 
-            deps.executor.enqueue({
-                id: `wander-${Date.now().toString(36)}`,
-                type: 'move_to',
-                params: {
-                    x: Math.round(rx),
-                    y: Math.round(y),
-                    z: Math.round(rz),
-                    reachDistance: 3,
-                },
-                priority: Priority.IDLE,
-                source: 'behavior',
-                createdAt: Date.now(),
-            });
-            return false; // one-shot, will re-evaluate next tick
+            // If already in water, find nearest land instead
+            const feetBlock = deps.bot.blockAt(pos);
+            if (feetBlock && (feetBlock.name === 'water' || feetBlock.name === 'lava' || feetBlock.name?.includes('water') || feetBlock.name?.includes('lava'))) {
+                const escape = findSafeLanding(deps.bot, pos, 8);
+                if (escape) {
+                    deps.submitTask({
+                        type: 'move_to',
+                        params: { x: escape.x, y: escape.y, z: escape.z, reachDistance: 2 },
+                        priority: Priority.IDLE_TASK,
+                    });
+                }
+                return false;
+            }
+
+            // Try up to 5 random positions to find a safe spot
+            for (let attempt = 0; attempt < 5; attempt++) {
+                const rx = pos.x + (Math.random() * 10 - 5);
+                const rz = pos.z + (Math.random() * 10 - 5);
+                const targetPos = deps.bot.entity.position.floored().offset(
+                    Math.round(rx - pos.x), 0, Math.round(rz - pos.z),
+                );
+
+                // Check if target block is safe
+                const targetBlock = deps.bot.blockAt(targetPos);
+                if (!targetBlock) continue;
+                const tName = targetBlock.name ?? '';
+                if (tName.includes('water') || tName.includes('lava')) continue;
+
+                // Check ground below target
+                const ground = deps.bot.blockAt(targetPos.offset(0, -1, 0));
+                if (!ground) continue;
+                const gName = ground.name ?? '';
+                if (gName.includes('water') || gName.includes('lava')) continue;
+                if (gName === 'air') continue;
+
+                const y = ground.position.y + 1;
+                deps.submitTask({
+                    type: 'move_to',
+                    params: { x: targetPos.x, y, z: targetPos.z, reachDistance: 2 },
+                    priority: Priority.IDLE,
+                });
+                return false;
+            }
+            return false;
         },
-        cooldownMs: 45000,
+        cooldownMs: 15000, // shorter since we're more selective
     };
+}
+
+/** Find a safe land position near the bot for water escape */
+function findSafeLanding(bot: any, fromPos: any, radius: number): { x: number; y: number; z: number } | null {
+    for (let r = 2; r <= radius; r += 2) {
+        for (let angle = 0; angle < 360; angle += 45) {
+            const rad = angle * (Math.PI / 180);
+            const tx = Math.round(fromPos.x + r * Math.cos(rad));
+            const tz = Math.round(fromPos.z + r * Math.sin(rad));
+            const tp = fromPos.floored().offset(tx - fromPos.x, 0, tz - fromPos.z);
+            const block = bot.blockAt(tp);
+            if (!block) continue;
+            const bn = block.name ?? '';
+            if (bn.includes('water') || bn.includes('lava') || bn === 'air') continue;
+            const ground = bot.blockAt(tp.offset(0, -1, 0));
+            if (!ground) continue;
+            const gn = ground.name ?? '';
+            if (gn.includes('water') || gn.includes('lava') || gn === 'air') continue;
+            return { x: tp.x, y: ground.position.y + 1, z: tp.z };
+        }
+    }
+    return null;
 }
 
 /** Collect nearby useful resources when idle */
@@ -185,13 +235,10 @@ export function createGatherBehavior(deps: BehaviorDeps): BehaviorNode {
             for (const pb of priorityBlocks) {
                 const match = s.nearbyBlocks.find((b) => b.name.includes(pb) && b.count >= 1);
                 if (match) {
-                    deps.executor.enqueue({
-                        id: `gather-${Date.now().toString(36)}`,
+                    deps.submitTask({
                         type: 'collect',
-                        params: { target: match.name, count: 2, maxDistance: 10 },
+                        params: { target: match.name, count: 1, maxDistance: 6 },
                         priority: Priority.IDLE_TASK,
-                        source: 'behavior',
-                        createdAt: Date.now(),
                     });
                     return false;
                 }
@@ -209,7 +256,7 @@ export function createAutoEatBehavior(deps: BehaviorDeps): BehaviorNode {
         priority: Priority.SAFETY,
         condition: () => {
             const food = deps.bot.food ?? 20;
-            return food <= (deps as any).hungerThreshold ?? 16;
+            return food <= (deps.hungerThreshold ?? 16);
         },
         tick: async () => {
             const foodItem = deps.bot.inventory
@@ -275,13 +322,10 @@ export function createPickupBehavior(deps: BehaviorDeps): BehaviorNode {
             return hasNearbyItemEntity(deps.bot, 8);
         },
         tick: async () => {
-            deps.executor.enqueue({
-                id: `pickup-${Date.now().toString(36)}`,
+            deps.submitTask({
                 type: 'pickup',
                 params: { scanRadius: 8, maxItems: 3 },
                 priority: Priority.EXPLORE,
-                source: 'behavior',
-                createdAt: Date.now(),
             });
             return false;
         },

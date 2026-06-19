@@ -5,9 +5,13 @@
  */
 import { EvoBotCore } from './core/bot.js';
 import { createCollectSteps } from './skills/collect-steps.js';
+import { fileLogger } from './utils/logger.js';
 import type { BotConfig } from './types/index.js';
 import fs from 'fs';
 import path from 'path';
+
+// Start file logging
+fileLogger.start();
 
 // Load config from filesystem (same as old bot.js)
 function loadConfig(): BotConfig {
@@ -58,6 +62,29 @@ if (process.stdin.isTTY) {
     const readline = require('readline');
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
+    /** Build a short status line showing current goal */
+    function getGoalLine(): string {
+        const cur = core.executor.getCurrentTask();
+        const seq = core.stepExecutor.getCurrentSequence();
+        const stepRunning = core.stepExecutor.isRunning;
+
+        if (stepRunning && seq) {
+            const step = seq.steps[seq.currentStepIndex];
+            return `[step] ${seq.name} · step ${seq.currentStepIndex + 1}/${seq.steps.length} (${step?.name ?? ''})`;
+        }
+        if (cur) {
+            const goal = (cur.params as any)?.target ?? (cur.params as any)?.goal ?? '';
+            return `[${cur.type}] ${goal} ${cur.params?.count ? `x${cur.params.count}` : ''}`;
+        }
+        return 'idle';
+    }
+
+    /** Refresh prompt with current goal */
+    function refreshPrompt(): void {
+        rl.setPrompt(`[${getGoalLine()}] > `);
+        rl.prompt(true);
+    }
+
     rl.on('line', (line: string) => {
         const [cmd, ...args] = line.trim().split(/\s+/);
         switch (cmd) {
@@ -65,6 +92,7 @@ if (process.stdin.isTTY) {
                 if (!args[0]) { console.log('Usage: plan <goal>'); break; }
                 core.plan(args.join(' ')).then((r: any) => {
                     console.log(`Plan result: ${r.success ? 'OK' : 'FAIL'} — ${r.detail}`);
+                    refreshPrompt();
                 });
                 break;
             case 'say':
@@ -91,7 +119,6 @@ if (process.stdin.isTTY) {
                 });
                 break;
             case 'collect2':
-                // Step-based collect (atomic steps for 8s connection windows)
                 if (!args[0]) { console.log('Usage: collect2 <block> [count]'); break; }
                 {
                     const target = args[0];
@@ -100,6 +127,7 @@ if (process.stdin.isTTY) {
                     console.log(`Starting step-based collect: ${target} x${count} (${sequence.steps.length} steps)`);
                     core.executeStepSequence(sequence).then((r) => {
                         console.log(`Step collect result: ${r.ok ? 'OK' : 'FAIL'} — ${r.detail}`);
+                        refreshPrompt();
                     });
                 }
                 break;
@@ -126,15 +154,38 @@ if (process.stdin.isTTY) {
                 break;
             case 'stop':
                 core.executor.clear();
+                core.stepExecutor.cancel();
                 core.bot?.pathfinder?.stop();
                 core.bot?.clearControlStates();
                 break;
             case 'status': {
                 const cur = core.executor.getCurrentTask();
+                const seq = core.stepExecutor.getCurrentSequence();
+                const stepRunning = core.stepExecutor.isRunning;
                 const history = core.executor.getHistory(3);
                 const safetyPhase = (core as any).safety?.recoveryPhase ?? 'none';
-                console.log(`Queue: ${core.executor.getQueueDepth()} | Current: ${cur?.type ?? 'idle'} | Safety: ${safetyPhase}`);
-                console.log(`Memory: ${core.memory.size} entries | Skills failing: ${core.memory.isSkillFalling ? 'check...' : 'OK'}`);
+                const ph = (core as any).positionHealth;
+                const phState = ph?.state?.[0] ?? '?';
+                const behav = (core as any).behavior;
+                const activeBeh = behav?.activeName ?? 'none';
+
+                console.log('── Bot Status ───────────────────────');
+                console.log(`Queue: ${core.executor.getQueueDepth()} | Safety: ${safetyPhase} | PH: ${phState}`);
+                console.log(`Behavior: ${activeBeh} | Memory: ${core.memory.size} entries`);
+
+                if (stepRunning && seq) {
+                    const step = seq.steps[seq.currentStepIndex];
+                    console.log(`Step Sequence: ${seq.name} [${seq.currentStepIndex + 1}/${seq.steps.length}]`);
+                    console.log(`  Current Step: ${step?.name} (${step?.type})`);
+                    console.log(`  State keys: ${Object.keys(seq.state).join(', ') || '(none)'}`);
+                } else if (cur) {
+                    const goal = (cur.params as any)?.target ?? (cur.params as any)?.goal ?? '';
+                    console.log(`Current Task: ${cur.type} ${goal} ${cur.params?.count ? `x${cur.params.count}` : ''}`);
+                    console.log(`  Priority: ${cur.priority} | Source: ${cur.source}`);
+                } else {
+                    console.log('Current: idle');
+                }
+
                 if (history.length) {
                     console.log('Last 3 results:');
                     history.forEach((h: any) => {
@@ -142,6 +193,18 @@ if (process.stdin.isTTY) {
                         console.log(`  ${status} ${h.task.type} (${h.elapsedMs}ms, ${h.retries}r): ${h.result.detail}`);
                     });
                 }
+
+                // Show step history
+                const stepHistory = core.stepExecutor.getHistory(5);
+                if (stepHistory.length > 0) {
+                    console.log('Last step results:');
+                    stepHistory.forEach((h: any) => {
+                        const status = h.result.ok ? 'OK' : 'FAIL';
+                        console.log(`  ${status} ${h.stepName} (${h.elapsedMs}ms): ${h.result.detail}`);
+                    });
+                }
+
+                console.log('─────────────────────────────────────');
                 break;
             }
             case 'spec': {
@@ -163,13 +226,64 @@ if (process.stdin.isTTY) {
             case 'quit':
                 core.shutdown();
                 process.exit(0);
+            case 'model':
+                if (!args[0]) {
+                    console.log(`Current model: ${core.getModel()}`);
+                    console.log('Usage: model <name>  — e.g. model deepseek-v4-flash');
+                } else {
+                    core.setModel(args[0]);
+                }
+                break;
+            case 'start':
+                core.connect();
+                break;
+            case 'disconnect':
+                core.disconnect();
+                break;
+            case 'server':
+                if (args.length < 2) {
+                    console.log(`Current: ${(core as any).config?.host ?? '?'}:${(core as any).config?.port ?? '?'}`);
+                    console.log('Usage: server <host> <port>');
+                } else {
+                    core.setServer(args[0], parseInt(args[1]) || 25565);
+                }
+                break;
+            case 'think':
+                console.log(core.getLastThink());
+                break;
+            case 'craft':
+                if (!args[0]) {
+                    console.log('Usage: craft <item> [count]');
+                    console.log('Known recipes: planks, stick, crafting_table, furnace, wooden_pickaxe, stone_pickaxe, iron_pickaxe, wooden_axe, stone_axe, wooden_sword, stone_sword');
+                } else {
+                    core.addTask({
+                        type: 'craft',
+                        params: { item: args[0], count: parseInt(args[1]) || 1 },
+                        priority: 6,
+                        source: 'console',
+                    });
+                }
+                break;
+            case 'inv':
+                console.log(core.inventoryManager.summary());
+                console.log(`Free slots: ${core.inventoryManager.freeSlots}`);
+                break;
+            case 'session':
+                console.log(core.sessionStats.summary());
+                break;
             default:
-                console.log('Commands: say, move, collect, collect2, scan, mem, gap [mins|raw|top], spec [mins], search <q>, stop, status, quit');
+                console.log('Commands: say, move, collect, collect2, scan, mem, gap [mins|raw|top], spec [mins], search <q>, stop, status, model <name>, start, disconnect, server <host> <port>, think, craft <item> [count], inv, session, quit');
         }
+        refreshPrompt();
     });
+
+    // Refresh prompt periodically (every 2s) to show current goal changes
+    setInterval(refreshPrompt, 2000);
+    refreshPrompt();
 }
 
 process.on('SIGINT', () => {
     core.shutdown();
+    fileLogger.stop();
     process.exit(0);
 });

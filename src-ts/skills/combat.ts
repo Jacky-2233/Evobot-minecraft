@@ -151,10 +151,7 @@ export function attackNearestHostile(bot: Bot): boolean {
         }
         try { bot.lookAt(targetPos); } catch {}
         nanTracer.trace('attack', { target: nearest.name, targetPos, pos: bot.entity.position });
-        try {
-            const p = bot.attack(nearest as any);
-            if (p && typeof p.catch === 'function') p.catch(() => {});
-        } catch {}
+        try { bot.attack(nearest as any); } catch {}
         return true;
     }
     return false;

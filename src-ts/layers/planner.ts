@@ -22,6 +22,8 @@ export interface PlannerDeps {
     memory: Memory;
     executor: Executor;
     config: BotConfig;
+    /** Submit a task through orchestrator (preserves id for result tracking) */
+    submitTask?: (task: { id: string; type: string; params: Record<string, unknown>; priority: number; source: string; createdAt: number; expiresAt?: number }) => void;
 }
 
 export interface PlanResult {
@@ -38,10 +40,14 @@ export class Planner {
     private memory: Memory;
     private executor: Executor;
     private config: BotConfig;
+    private _submitTask: ((task: { id: string; type: string; params: Record<string, unknown>; priority: number; source: string; createdAt: number; expiresAt?: number }) => void) | null = null;
 
     private _currentPlan: Plan | null = null;
     private _currentStepIndex = 0;
     private _running = false;
+
+    /** Callback for LLM think output (prompt + response) */
+    onThink: ((prompt: string, response: string) => void) | null = null;
 
     constructor(deps: PlannerDeps) {
         this.bot = deps.bot;
@@ -49,6 +55,7 @@ export class Planner {
         this.memory = deps.memory;
         this.executor = deps.executor;
         this.config = deps.config;
+        this._submitTask = deps.submitTask ?? null;
     }
 
     get isRunning(): boolean {
@@ -218,7 +225,6 @@ export class Planner {
             const id = `plan-${Date.now().toString(36)}`;
             const oldComplete = this.executor.onComplete;
 
-            // Temporarily hook to catch this specific task's result
             this.executor.onComplete = (tr) => {
                 if (tr.task.id === id) {
                     this.executor.onComplete = oldComplete;
@@ -231,17 +237,22 @@ export class Planner {
                 }
             };
 
-            this.executor.enqueue({
+            const task = {
                 id,
                 type: step.skillName,
                 params: step.params,
                 priority: 5,
-                source: 'planner',
+                source: 'planner' as const,
                 createdAt: Date.now(),
                 expiresAt: Date.now() + (step.timeoutMs || 60000),
-            });
+            };
 
-            // Timeout fallback
+            if (this._submitTask) {
+                this._submitTask(task);
+            } else {
+                this.executor.enqueue(task);
+            }
+
             setTimeout(() => {
                 resolve({ ok: false, detail: 'Step timeout' });
             }, step.timeoutMs || 60000);
@@ -314,21 +325,17 @@ export class Planner {
     private async callLLM(
         messages: { role: string; content: string }[],
     ): Promise<string> {
-        const { OpenAI } = await import('openai');
-
-        const client = new OpenAI({
-            apiKey: this.config.ai.apiKey,
-            baseURL: this.config.ai.baseURL,
-        });
-
-        const response = await client.chat.completions.create({
-            model: this.config.ai.model,
-            messages: messages as any,
-            max_tokens: this.config.ai.maxTokens,
+        const { callLLM: sharedCall } = await import('../utils/llm.js');
+        const content = await sharedCall(messages, {
+            maxTokens: this.config.ai.maxTokens,
             temperature: 0.5,
         });
 
-        return response.choices?.[0]?.message?.content?.trim() ?? '';
+        if (this.onThink) {
+            const lastMsg = messages[messages.length - 1]?.content ?? '';
+            this.onThink(lastMsg.slice(0, 1000), content.slice(0, 2000));
+        }
+        return content;
     }
 
     private parsePlanResponse(json: string, goal: string): Plan {

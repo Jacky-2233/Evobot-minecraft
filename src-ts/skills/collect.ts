@@ -39,6 +39,7 @@ export class CollectSkill extends BaseSkill<CollectParams> {
         const { target, count = 1, maxDistance = 30 } = params;
         let collected = 0;
         let attempts = 0;
+        let consecutiveFailReasons: string[] = [];
 
         while (collected < count && attempts < count * 3) {
             if (ctx.signal.aborted) {
@@ -62,7 +63,10 @@ export class CollectSkill extends BaseSkill<CollectParams> {
 
             // Move close to block
             const moved = await this.moveToBlock(block);
-            if (!moved) continue;
+            if (!moved) {
+                consecutiveFailReasons.push('move_failed');
+                continue;
+            }
 
             // ─── Dig stance planning ───────────────────────
             const stanceResult = chooseDigStance(this.bot, block, {
@@ -73,13 +77,58 @@ export class CollectSkill extends BaseSkill<CollectParams> {
             if (stanceResult.ok && stanceResult.stance) {
                 const stancePos = stanceResult.stance.position;
                 const botPos = this.bot.entity.position.floored();
-                // If optimal stance is different from current, move there
+                const currentFooting = this.bot.blockAt(botPos.offset(0, -1, 0));
+                const botOnLeaves = currentFooting?.name?.includes('leaves') ?? false;
+
+                // If optimal stance differs from current, move there
                 if (botPos.x !== stancePos.x || botPos.y !== stancePos.y || botPos.z !== stancePos.z) {
-                    ctx.log('info', `Moving to dig stance (${stancePos.x},${stancePos.y},${stancePos.z}) score=${stanceResult.stance.score}`);
-                    await this.moveToPos(stancePos);
+                    // Special log: if bot is on leaves and stance is solid, mention it
+                    if (botOnLeaves && stanceResult.stance.stableFooting) {
+                        ctx.log('info', `Moving off leaves to solid stance (${stancePos.x},${stancePos.y},${stancePos.z}) score=${stanceResult.stance.score}`);
+                    } else {
+                        ctx.log('info', `Moving to dig stance (${stancePos.x},${stancePos.y},${stancePos.z}) score=${stanceResult.stance.score}`);
+                    }
+                    const stanceMoved = await this.moveToPos(stancePos);
+                    if (!stanceMoved) {
+                        ctx.log('warn', `Failed to move to dig stance at (${stancePos.x},${stancePos.y},${stancePos.z})`);
+                        consecutiveFailReasons.push('stance_move_failed');
+                        continue;
+                    }
+                } else {
+                    ctx.log('info', `Already at optimal dig stance`);
                 }
             } else {
-                ctx.log('warn', `No good dig stance: ${stanceResult.reason ?? 'unknown'}`);
+                const reason = stanceResult.reason ?? 'unknown';
+                ctx.log('warn', `No good dig stance: ${reason}`);
+                consecutiveFailReasons.push(`stance_${reason}`);
+
+                // Handle specific failure cases
+                if (reason === 'target_under_feet') {
+                    // Target is directly under bot's feet — try moving 1 block to the side
+                    ctx.log('info', 'Target under feet, moving aside');
+                    const sidePos = this.bot.entity.position.floored().offset(1, 0, 0);
+                    await this.moveToPos(sidePos);
+                    continue;
+                }
+                if (reason === 'unsafe_footing' && (block.name?.includes('log') || block.name?.includes('wood'))) {
+                    // Target is a log but footing is unsafe (likely on leaves)
+                    ctx.log('info', 'Log in tree crown — trying lower stance');
+                    // Try to find lower ground by moving down
+                    const curPos = this.bot.entity.position.floored();
+                    const lowerPos = { x: curPos.x, y: curPos.y - 2, z: curPos.z };
+                    const lowerFooting = this.bot.blockAt(lowerPos as any);
+                    if (lowerFooting && lowerFooting.name !== 'air') {
+                        await this.moveToPos(lowerPos);
+                        continue;
+                    }
+                }
+                if (consecutiveFailReasons.length >= 3) {
+                    // Too many stance failures — abort this block
+                    ctx.log('warn', `Too many stance failures for ${target}, moving on`);
+                    consecutiveFailReasons = [];
+                    continue;
+                }
+                continue; // Try next block
             }
 
             // Validate stance before dig
@@ -88,6 +137,7 @@ export class CollectSkill extends BaseSkill<CollectParams> {
             });
             if (!validated.ok) {
                 ctx.log('warn', `Dig stance invalid: ${validated.reason}`);
+                consecutiveFailReasons.push(`validate_${validated.reason}`);
                 continue;
             }
 
@@ -97,10 +147,12 @@ export class CollectSkill extends BaseSkill<CollectParams> {
                 this.bot.lookAt(bp.offset(0.5, 0.5, 0.5));
                 await this.digWithRetry(block, 3);
                 collected++;
+                consecutiveFailReasons = [];
                 ctx.log('info', `Collected ${target} ${collected}/${count}`);
             } catch (err: unknown) {
                 const msg = err instanceof Error ? err.message : String(err);
                 ctx.log('warn', `Dig error: ${msg}`);
+                consecutiveFailReasons.push(`dig_${msg.slice(0, 20)}`);
             }
         }
 
