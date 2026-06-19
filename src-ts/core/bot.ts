@@ -29,6 +29,7 @@ import {
     createAutoEatBehavior,
     createSocialBehavior,
     createPickupBehavior,
+    findSafeLanding,
 } from '../layers/behavior.js';
 import { Planner } from '../layers/planner.js';
 import { GapDetector } from '../layers/gap-detector.js';
@@ -76,6 +77,7 @@ export class EvoBotCore {
     private _reconnectAttempts = 0;
     private _nanSince = 0;
     private _lastThink = '';
+    private _escapingWater = false;
 
     constructor(options: EvoBotCoreOptions) {
         this.config = options.config;
@@ -151,6 +153,7 @@ export class EvoBotCore {
         console.log('[Core] Spawned');
         this.running = true;
         this.sessionStats.start();
+        this._escapingWater = false;
 
         // Pathfinder movements
         const mcData = require('minecraft-data')(this.bot.version);
@@ -420,6 +423,27 @@ export class EvoBotCore {
                     }
                 } else {
                     this._nanSince = 0;
+                }
+
+                // 0b. Water escape — immediate, not dependent on wander/executor idle
+                if (!Number.isNaN(pos.x) && !Number.isNaN(pos.y) && !Number.isNaN(pos.z)) {
+                    const feetBlock = this.bot.blockAt(pos);
+                    const inWater = feetBlock && (feetBlock.name?.includes('water') ?? false);
+                    if (inWater && !this._escapingWater) {
+                        this._escapingWater = true;
+                        console.warn('[Core] In water — emergency escape!');
+                        this.bot.pathfinder?.stop();
+                        this.bot.clearControlStates();
+                        const landing = findSafeLanding(this.bot, pos, 10);
+                        if (landing) {
+                            this.orchestrator.raiseEmergency('Water escape', 'move_to', {
+                                x: landing.x, y: landing.y, z: landing.z,
+                                reachDistance: 2, timeoutMs: 15000,
+                            });
+                        }
+                    } else if (!inWater) {
+                        this._escapingWater = false;
+                    }
                 }
 
                 // 1. Perception: refresh world state
