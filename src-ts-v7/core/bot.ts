@@ -8,6 +8,7 @@ import { CollectSkill, type CollectParams } from '../skills/collect.js';
 import { EatSkill } from '../skills/eat.js';
 import { RetreatSkill, attackNearestHostile } from '../skills/retreat.js';
 import { CraftSkill } from '../skills/craft.js';
+import { CraftChainSkill, listCraftChains } from '../skills/craft-chain.js';
 import { initLLM, callLLM, getModel, setModel, listModels } from '../utils/llm.js';
 import { isFiniteVec3 } from '../utils/nan-guard.js';
 import type { BotConfig, SkillResult } from '../types/index.js';
@@ -24,7 +25,7 @@ function getGoalNear(): any {
     return _GoalNear;
 }
 
-type AnySkill = MoveToSkill | CollectSkill | EatSkill | RetreatSkill | CraftSkill;
+type AnySkill = MoveToSkill | CollectSkill | EatSkill | RetreatSkill | CraftSkill | CraftChainSkill;
 
 export class EvoBotV7 {
     readonly bot: Bot;
@@ -59,6 +60,7 @@ export class EvoBotV7 {
         this.register(new EatSkill(this.bot));
         this.register(new RetreatSkill(this.bot));
         this.register(new CraftSkill(this.bot));
+        this.register(new CraftChainSkill(this.bot));
 
         initLLM(config);
         this.setupEvents();
@@ -77,6 +79,8 @@ export class EvoBotV7 {
     getModel(): string { return getModel(); }
     setModel(name: string): void { setModel(name); }
     listModels(): string { return listModels(); }
+    listCraftChains(): string { return listCraftChains(); }
+    submitTask(type: string, params: any): void { this._taskQueue.push({ type, params }); }
 
     private setupEvents(): void {
         this.bot.once('spawn', () => this.onSpawn());
@@ -223,9 +227,10 @@ ${state}
 
 Available actions (JSON only):
 {"do":"move_to","x":NUM,"y":NUM,"z":NUM}  — walk to coordinates. Pick ONE destination 8-16 blocks away and commit to it.
-{"do":"collect","target":"log"}            — mine nearest block (try: log, stone, cobblestone, coal_ore, iron_ore)
+{"do":"collect","target":"log","count":1}  — mine nearest blocks (count optional)
+{"do":"craft_chain","item":"wooden_pickaxe"} — gather + craft full chain (wooden_pickaxe, stone_pickaxe, crafting_table, sticks, furnace)
+{"do":"craft","item":"stone_pickaxe"}       — craft single item if materials already in inventory
 {"do":"eat"}                               — eat food from inventory
-{"do":"craft","item":"stone_pickaxe"}       — craft item (planks, stick, crafting_table, wooden_pickaxe, stone_pickaxe, furnace)
 {"do":"retreat","distance":16}             — run from danger
 {"do":"wait"}                              — skip tick (only if busy)
 
@@ -267,7 +272,8 @@ Respond with JSON (no other text):
 {"reply":"your chat reply","do":"wait"} — just chat, no action
 {"reply":"ok coming!","do":"move_to","x":0,"y":64,"z":0} — chat AND move
 {"reply":"here you go","do":"collect","target":"log"} — chat AND collect
-{"reply":"on it","do":"craft","item":"wooden_pickaxe"} — chat AND craft
+{"reply":"on it","do":"craft_chain","item":"wooden_pickaxe"} — chat AND auto gather+craft
+{"reply":"on it","do":"craft","item":"wooden_pickaxe"} — chat AND craft from inventory
 {"reply":"running!","do":"retreat","distance":16} — chat AND retreat`;
 
         const reply = await callLLM([
@@ -310,8 +316,8 @@ Respond with JSON (no other text):
             const j = JSON.parse(m[0]);
             const r: any = { type: 'wait', params: {}, _reply: j.reply };
             if (j.do === 'move_to') { r.type = 'move_to'; r.params = { x: j.x, y: j.y, z: j.z, reachDistance: 2 }; }
-            else if (j.do === 'collect') { r.type = 'collect'; r.params = { target: j.target, count: 1 }; }
-            else if (j.do === 'eat') { r.type = 'eat'; r.params = {}; }
+            else if (j.do === 'collect') { r.type = 'collect'; r.params = { target: j.target, count: j.count ?? 1 }; }
+            else if (j.do === 'craft_chain') { r.type = 'craft_chain'; r.params = { item: j.item }; }
             else if (j.do === 'craft') { r.type = 'craft'; r.params = { item: j.item, count: 1 }; }
             else if (j.do === 'retreat') { r.type = 'retreat'; r.params = { distance: j.distance ?? 16 }; }
             return r;

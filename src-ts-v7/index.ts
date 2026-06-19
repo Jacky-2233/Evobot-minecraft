@@ -56,9 +56,18 @@ if (process.stdin.isTTY) {
                     core.setModel(args[0]);
                 }
                 break;
+            case 'make':
+                if (!args[0]) {
+                    console.log(`Craft chains: ${core.listCraftChains()}`);
+                    console.log('Usage: make <item>');
+                } else {
+                    core.submitTask('craft_chain', { item: args[0] });
+                    console.log(`Queued craft_chain: ${args[0]}`);
+                }
+                break;
             case 'stop': core.bot?.pathfinder?.stop(); core.bot?.clearControlStates(); break;
             case 'quit': core.bot?.quit(); process.exit(0); break;
-            default: console.log('Commands: say, move <x> <y> <z>, model [name], stop, quit');
+            default: console.log('Commands: say, move <x> <y> <z>, make <item>, model [name], stop, quit');
         }
     });
     rl.setPrompt('[v7] > '); rl.prompt();
