@@ -260,6 +260,9 @@ IMPORTANT:
         this._log('chat.jsonl', { type: 'user', username, message, pos: p ? { x: p.x, y: p.y, z: p.z } : null });
         console.log(`[chat] <${username}> ${message}`);
 
+        // Ignore server/system messages without a username
+        if (!username || username === '§') return;
+
         const state = this.buildStatePrompt();
         const prompt = `You are a Minecraft bot. A player is talking to you.
 
@@ -281,7 +284,11 @@ Respond with JSON (no other text):
             { role: 'user', content: prompt },
         ], { maxTokens: 200, temperature: 0.7 });
 
-        if (!reply) return;
+        console.log(`[chat] raw LLM reply: ${reply || '(empty)'}`);
+        if (!reply) {
+            this.bot.chat('Hmm, I did not catch that.');
+            return;
+        }
 
         // Try to parse JSON; if fails, treat entire reply as chat text
         const action = this.parseAction(reply);
@@ -291,19 +298,19 @@ Respond with JSON (no other text):
                 this.bot.chat(chatMsg);
                 console.log(`[chat] <EvoBot> ${chatMsg}`);
                 this._log('chat.jsonl', { type: 'bot_reply', to: username, reply: chatMsg, rawLLM: reply });
+            } else {
+                console.log('[chat] no reply text in JSON');
             }
-            // Enqueue action (skip if it's a chat-only message)
-            if (action.type !== 'wait' || (action as any)._reply) {
-                if (action.type !== 'wait') {
-                    this._taskQueue = [action]; // replace queue (player command priority)
-                    console.log(`[chat] enqueued: ${action.type} ${JSON.stringify(action.params)}`);
-                }
+            if (action.type !== 'wait') {
+                this._taskQueue = [action]; // replace queue (player command priority)
+                console.log(`[chat] enqueued: ${action.type} ${JSON.stringify(action.params)}`);
             }
         } else {
             // Failed to parse JSON — treat as plain text reply
-            this.bot.chat(reply);
-            console.log(`[chat] <EvoBot> ${reply}`);
-            this._log('chat.jsonl', { type: 'bot_reply', to: username, reply, rawLLM: reply });
+            const cleanReply = reply.slice(0, 100);
+            this.bot.chat(cleanReply);
+            console.log(`[chat] <EvoBot> ${cleanReply}`);
+            this._log('chat.jsonl', { type: 'bot_reply', to: username, reply: cleanReply, rawLLM: reply });
         }
     }
 
