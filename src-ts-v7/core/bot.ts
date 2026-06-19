@@ -41,6 +41,7 @@ export class EvoBotV7 {
     // Decision/movement pacing (prevents erratic running)
     private _lastDecisionMs = 0;
     private _lastArrivalMs = 0;
+    private _lastMoveTarget: { x: number; y: number; z: number } | null = null;
     private readonly _decisionCooldownMs = 2000;
     private readonly _arrivalCooldownMs = 1500;
 
@@ -166,7 +167,10 @@ export class EvoBotV7 {
             console.log(`[V7] ${result.ok ? 'OK' : 'FAIL'} ${task.type}: ${result.detail}`);
             this._taskQueue.shift();
             this._lastEvent = `${result.ok ? 'OK' : 'FAIL'} ${task.type}: ${result.detail}`;
-            if (task.type === 'move_to' || task.type === 'explore') this._lastArrivalMs = Date.now();
+            if (task.type === 'move_to') {
+                this._lastMoveTarget = { x: task.params.x, y: task.params.y, z: task.params.z };
+                this._lastArrivalMs = Date.now();
+            }
             return;
         }
 
@@ -194,11 +198,13 @@ export class EvoBotV7 {
         const posStr = p ? `(${p.x.toFixed(0)}, ${p.y.toFixed(0)}, ${p.z.toFixed(0)})` : '(?, ?, ?)';
         const nearby = p ? this.bot.findBlock({ matching: (b: any) => !!b && b.name !== 'air', maxDistance: 8 }) : null;
         const blockStr = nearby ? `${nearby.name}` : 'none';
+        const lastMove = this._lastMoveTarget ? `(${this._lastMoveTarget.x}, ${this._lastMoveTarget.y}, ${this._lastMoveTarget.z})` : 'none';
         return `HP: ${hp}/${fd}
 Pos: ${posStr}
 Inv: ${invStr}
 Hostile: ${hostileStr}
 Block ahead: ${blockStr}
+Last move target: ${lastMove}
 Last event: ${this._lastEvent || 'none'}`;
     }
 
@@ -216,8 +222,7 @@ State:
 ${state}
 
 Available actions (JSON only):
-{"do":"explore"}                           — walk 8-16 blocks in a random direction (bot picks safe coords)
-{"do":"move_to","x":NUM,"y":NUM,"z":NUM}  — walk to specific coordinates (only if player/task gave them)
+{"do":"move_to","x":NUM,"y":NUM,"z":NUM}  — walk to coordinates. Pick ONE destination 8-16 blocks away and commit to it.
 {"do":"collect","target":"log"}            — mine nearest block (try: log, stone, cobblestone, coal_ore, iron_ore)
 {"do":"eat"}                               — eat food from inventory
 {"do":"craft","item":"stone_pickaxe"}       — craft item (planks, stick, crafting_table, wooden_pickaxe, stone_pickaxe, furnace)
@@ -225,8 +230,8 @@ Available actions (JSON only):
 {"do":"wait"}                              — skip tick (only if busy)
 
 IMPORTANT:
-- Prefer explore when idle. The bot will commit to one direction and not change its mind for a few seconds.
-- Only use move_to if you have a real destination. Do NOT ping-pong between nearby points.
+- When idle, use move_to to explore. Pick a destination and stick to it; do NOT ping-pong to nearby points.
+- Avoid reversing direction from "Last move target".
 - If hostile is nearby, use retreat.
 - Coords must be integers.`;
 
@@ -263,8 +268,7 @@ Respond with JSON (no other text):
 {"reply":"ok coming!","do":"move_to","x":0,"y":64,"z":0} — chat AND move
 {"reply":"here you go","do":"collect","target":"log"} — chat AND collect
 {"reply":"on it","do":"craft","item":"wooden_pickaxe"} — chat AND craft
-{"reply":"exploring!","do":"explore"} — chat AND explore
-{"do":"retreat","reply":"help!",distance":16} — chat AND retreat`;
+{"reply":"running!","do":"retreat","distance":16} — chat AND retreat`;
 
         const reply = await callLLM([
             { role: 'system', content: 'You are a Minecraft bot. Reply in JSON with "reply" (1 sentence) and optional action.' },
@@ -305,8 +309,7 @@ Respond with JSON (no other text):
         try {
             const j = JSON.parse(m[0]);
             const r: any = { type: 'wait', params: {}, _reply: j.reply };
-            if (j.do === 'explore') { r.type = 'explore'; r.params = {}; }
-            else if (j.do === 'move_to') { r.type = 'move_to'; r.params = { x: j.x, y: j.y, z: j.z, reachDistance: 2 }; }
+            if (j.do === 'move_to') { r.type = 'move_to'; r.params = { x: j.x, y: j.y, z: j.z, reachDistance: 2 }; }
             else if (j.do === 'collect') { r.type = 'collect'; r.params = { target: j.target, count: 1 }; }
             else if (j.do === 'eat') { r.type = 'eat'; r.params = {}; }
             else if (j.do === 'craft') { r.type = 'craft'; r.params = { item: j.item, count: 1 }; }
@@ -317,24 +320,9 @@ Respond with JSON (no other text):
 
     private async runSkill(type: string, params: any): Promise<SkillResult> {
         if (type === 'wait') return { ok: true, detail: 'Waited one tick' };
-        if (type === 'explore') {
-            const target = this.pickExploreTarget();
-            return this.runSkill('move_to', { x: target.x, y: target.y, z: target.z, reachDistance: 2 });
-        }
         const s = this.skills.get(type);
         if (!s) return { ok: false, detail: `Unknown skill: ${type}` };
         return s.run(params);
-    }
-
-    private pickExploreTarget(): { x: number; y: number; z: number } {
-        const p = this.bot.entity.position;
-        const angle = Math.random() * Math.PI * 2;
-        const dist = 8 + Math.random() * 8;
-        return {
-            x: Math.round(p.x + Math.cos(angle) * dist),
-            y: Math.round(p.y),
-            z: Math.round(p.z + Math.sin(angle) * dist),
-        };
     }
 
     private findHostile(radius: number): any {
