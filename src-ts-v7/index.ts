@@ -35,12 +35,20 @@ console.log('================================');
 process.on('uncaughtException', (err) => {
     console.error('[FATAL] Uncaught exception:', err.message);
     console.error(err.stack);
+    process.exit(1);
 });
 process.on('unhandledRejection', (reason, promise) => {
     console.error('[FATAL] Unhandled rejection at:', promise, 'reason:', reason);
 });
 
-const core = new EvoBotV7(loadConfig());
+let core: EvoBotV7;
+try {
+    core = new EvoBotV7(loadConfig());
+} catch (e) {
+    console.error('[FATAL] Failed to create bot:', (e as Error).message);
+    console.error((e as Error).stack);
+    process.exit(1);
+}
 
 if (process.stdin.isTTY) {
     const rl = require('readline').createInterface({ input: process.stdin, output: process.stdout });
