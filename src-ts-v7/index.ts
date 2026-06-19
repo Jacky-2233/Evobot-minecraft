@@ -50,10 +50,10 @@ if (process.stdin.isTTY) {
             case 'model':
                 if (!args[0]) {
                     console.log(`Current model: ${core.getModel()}`);
-                    console.log('Usage: model <name>  (e.g. model deepseek-v4-flash)');
+                    console.log(`Available: ${core.listModels()}`);
+                    console.log('Usage: model <name>  (also accepts raw model IDs)');
                 } else {
                     core.setModel(args[0]);
-                    console.log(`Model switched to: ${args[0]}`);
                 }
                 break;
             case 'stop': core.bot?.pathfinder?.stop(); core.bot?.clearControlStates(); break;
