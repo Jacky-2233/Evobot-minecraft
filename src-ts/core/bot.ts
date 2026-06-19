@@ -215,9 +215,12 @@ export class EvoBotCore {
             hostileEvadeDistance: 12,
         });
         this.safety.markSpawned();
-        // Safety → Orchestrator: emergency tasks through raiseEmergency
-        this.safety.onEmergency = (text, taskType, params) =>
+        // Safety → Orchestrator: stop body + raise emergency
+        this.safety.onEmergency = (text, taskType, params) => {
+            this.bot.pathfinder?.stop();
+            this.bot.clearControlStates();
             this.orchestrator.raiseEmergency(text, taskType, params);
+        };
 
         // Wire executor → memory + checkpoint + events
         this.executor.onTaskStart = (task) => {
@@ -422,14 +425,13 @@ export class EvoBotCore {
                 // 1. Perception: refresh world state
                 const summary = this.perception!.scan();
 
-                // 2. Safety: check danger conditions
-                this.safety!.tick(this.executor);
+                // 2. Safety: check danger conditions — handles body stop via onEmergency
+                const safetySignal = this.safety!.tick();
 
-                // 3. If safety is overriding OR position invalid, pause behavior + cancel current task
-                if (this.safety!.isOverriding || !ph.canMove) {
+                // 3. If safety is active OR position invalid, pause behavior + interrupt execution
+                if (this.safety!.isActive || !ph.canMove) {
                     this.behavior?.pause();
                     if (!ph.canMove) {
-                        // Position invalid — cancel current executor task immediately
                         this.executor.clear();
                     }
                 } else {
@@ -452,8 +454,8 @@ export class EvoBotCore {
                 const hostileStr = summary
                     ? `Hostile=${summary.nearbyHostile.length}`
                     : '';
-                const safetyStr = this.safety?.isOverriding
-                    ? ` SAFETY:${this.safety.recoveryPhase}`
+                const safetyStr = this.safety?.isActive
+                    ? ` SAFETY:${this.safety.phase}`
                     : '';
                 const behavStr = this.behavior?.activeName
                     ? ` Beh:${this.behavior.activeName}`
@@ -603,7 +605,7 @@ export class EvoBotCore {
 
                     // If health is low, trigger immediate safety check
                     if (now <= this.config.lowHealthThreshold) {
-                        this.safety?.onDamaged(this.executor);
+                        this.safety?.onDamaged();
                         nanTracer.trace('safety.onDamaged');
                     }
                 }
