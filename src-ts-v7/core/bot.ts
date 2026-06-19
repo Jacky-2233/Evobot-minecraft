@@ -191,6 +191,9 @@ Choose wisely based on state. Prioritize: survival > tools > resources > explore
         ], { maxTokens: 150, temperature: 0.3 });
 
         this._log('think.jsonl', { type: 'decision', prompt, reply, hp, fd, posStr });
+        if (reply && reply !== '{"do":"wait"}') {
+            console.log(`[think] ${reply}`);
+        }
 
         if (!reply) return { type: 'wait', params: {} };
         try {
@@ -208,6 +211,7 @@ Choose wisely based on state. Prioritize: survival > tools > resources > explore
     private async thinkAndChat(username: string, message: string): Promise<void> {
         const p = this.bot.entity?.position;
         this._log('chat.jsonl', { type: 'user', username, message, pos: p ? { x: p.x, y: p.y, z: p.z } : null });
+        console.log(`[chat] <${username}> ${message}`);
         const prompt = `You are a Minecraft bot. Reply in 1 sentence.
 HP=${this.bot.health?.toFixed(0)} Food=${this.bot.food?.toFixed(0)} Pos=(${p?.x.toFixed(0) ?? '?'},${p?.y.toFixed(0) ?? '?'},${p?.z.toFixed(0) ?? '?'})
 Player <${username}>: "${message}"`;
@@ -217,7 +221,7 @@ Player <${username}>: "${message}"`;
         ], { maxTokens: 80, temperature: 0.8 });
         if (reply) {
             this.bot.chat(reply);
-            console.log(`[V7] <${reply}>`);
+            console.log(`[chat] <EvoBot> ${reply}`);
             this._log('chat.jsonl', { type: 'bot_reply', to: username, reply, prompt });
         }
     }
