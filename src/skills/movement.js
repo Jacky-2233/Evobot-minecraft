@@ -24,6 +24,7 @@ class MovementSkill {
             return true;
         } catch (e) {
             this.bot.pathfinder.stop();
+            this.bot.clearControlStates();
             return false;
         }
     }
@@ -38,6 +39,7 @@ class MovementSkill {
             return true;
         } catch (e) {
             this.bot.pathfinder.stop();
+            this.bot.clearControlStates();
             return false;
         }
     }

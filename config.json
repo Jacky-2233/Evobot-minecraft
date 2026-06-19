@@ -21,7 +21,7 @@
     "apiKey": "sk-ad0838772f58402fb66087b7d8af153e",
     "apiKeyFile": "deepseek api.txt",
     "baseURL": "https://api.deepseek.com/v1",
-    "model": "deepseek-chat",
+    "model": "deepseek-v4-pro",
     "maxHistory": 20,
     "replyTimeout": 15000,
     "maxTokens": 200
@@ -46,9 +46,27 @@
       "sand",
       "rotten_flesh",
       "stick"
-    ]
+    ],
+    "dangerCheckEnabled": true,
+    "idleGoalsEnabled": true,
+    "moodEnabled": true
   },
   "evolution": {
     "enabled": true
+  },
+  "vision": {
+    "enabled": true,
+    "apiKey": "",
+    "baseURL": "",
+    "model": "kimi-v1",
+    "timeout": 20000,
+    "maxTokens": 200
+  },
+  "viewer": {
+    "enabled": true,
+    "port": 3001,
+    "headless": true,
+    "viewDistance": 4,
+    "browserExecutable": ""
   }
 }

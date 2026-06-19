@@ -19,6 +19,15 @@ const GatherSkill = require('../skills/gather');
 const FarmingSkill = require('../skills/farming');
 const BuildingSkill = require('../skills/building');
 const StorageSkill = require('../skills/storage');
+const DangerAwareness = require('../skills/danger');
+const IdleGoalPlanner = require('./IdleGoalPlanner');
+const TaskPlanner = require('./TaskPlanner');
+const MoodSystem = require('./MoodSystem');
+const VisionSkill = require('../skills/vision');
+const ViewerSkill = require('../skills/viewer');
+const PrimitiveActions = require('../skills/primitive');
+const SkillRegistry = require('./SkillRegistry');
+const MemorySystem = require('./MemorySystem');
 
 class Agent {
     constructor() {
@@ -38,6 +47,13 @@ class Agent {
         this.dashboard = null;
         this.lastDamageTime = 0;
         this.intervals = [];
+        this.danger = null;
+        this.idlePlanner = null;
+        this.taskPlanner = null;
+        this.mood = null;
+        this.idleStartTime = 0;
+        this.skillRegistry = null;
+        this.memory = null;
     }
 
     start() {
@@ -106,6 +122,9 @@ class Agent {
         this.skills.farming = new FarmingSkill(this);
         this.skills.building = new BuildingSkill(this);
         this.skills.storage = new StorageSkill(this);
+        this.skills.vision = new VisionSkill(this);
+        this.skills.viewer = new ViewerSkill(this);
+        this.skills.primitive = new PrimitiveActions(this);
 
         // Initialize core systems
         this.taskQueue = new TaskQueue(this);
@@ -114,6 +133,15 @@ class Agent {
         this.chatBrain = new ChatBrain(this);
         this.dashboard = new Dashboard(this);
         this.dashboard.start();
+
+        // New autonomous / safety / emotion systems
+        this.danger = new DangerAwareness(this);
+        this.idlePlanner = new IdleGoalPlanner(this);
+        this.taskPlanner = new TaskPlanner(this);
+        this.mood = new MoodSystem(this);
+        this.skillRegistry = new SkillRegistry(this);
+        this.skillRegistry.registerDefaults();
+        this.memory = new MemorySystem(this);
 
         this.setupEvents();
         this.startUpdateLoop();
@@ -124,16 +152,42 @@ class Agent {
     }
 
     setupEvents() {
+        // Catch NaN as early as possible in physics tick
+        this.bot.on('physicsTick', () => {
+            if (!this.bot?.entity) return;
+            const pos = this.bot.entity.position;
+            if (Number.isNaN(pos.x) || Number.isNaN(pos.y) || Number.isNaN(pos.z)) {
+                this.log('[CRITICAL] physicsTick Position NaN');
+                this.cleanup();
+                if (this.config.bot.autoReconnect) {
+                    setTimeout(() => this.start(), this.config.bot.reconnectDelay);
+                }
+            }
+        });
+
         let prevHealth = this.bot.health;
         this.bot.on('health', () => {
             if (this.bot.health < prevHealth) {
                 this.lastDamageTime = Date.now();
+                this.mood?.onEvent('damaged', { health: this.bot.health });
             }
             prevHealth = this.bot.health;
         });
 
         const handleChat = async (username, message) => {
             if (username === this.bot.username) return;
+            this.mood?.onEvent('player_chat', { username });
+            this.mood?.trust(username, 1);
+
+            // Try task planner first; if it recognizes a chain, add it and still let AI reply.
+            const chain = this.taskPlanner?.planFromIntent(message);
+            if (chain && chain.length > 0) {
+                this.log(`[Planner] Recognized chain: ${chain.map(t => t.type).join(' -> ')}`);
+                for (const step of chain) {
+                    this.taskQueue.add(step.type, step.params, step.options);
+                }
+            }
+
             try {
                 await this.chatBrain.handleChat(username, message);
             } catch (e) {
@@ -148,11 +202,31 @@ class Agent {
             this.taskQueue.clear();
             this.bot.pathfinder.stop();
             this.bot.clearControlStates();
+            this.mood?.onEvent('died');
+        });
+
+        this.bot.on('playerCollect', (player, item) => {
+            if (player.username === this.bot.username) {
+                if (item?.name?.includes('diamond') || item?.name?.includes('emerald') || item?.name?.includes('iron_ingot')) {
+                    this.mood?.onEvent('collected_rare', { item: item.name });
+                }
+            }
         });
     }
 
     startUpdateLoop() {
         const INTERVAL = this.config.bot.updateInterval;
+
+        // Keep the world block-cache warm by periodically reading the block
+        // at the bot's position. This is a belt-and-suspenders measure that
+        // complements the physicsTick NaN guard above — in some server
+        // environments, letting the world cache go stale appears to
+        // contribute to physics timing issues.
+        this.intervals.push(setInterval(() => {
+            if (this.bot?.entity) {
+                this.bot.blockAt(this.bot.entity.position);
+            }
+        }, 2000));
 
         this.intervals.push(setInterval(async () => {
             if (!this.bot?.entity) return;
@@ -170,6 +244,20 @@ class Agent {
             await this.skills.survival.eatIfNeeded();
             await this.skills.survival.healIfCritical();
             this.skills.combat.equipArmor();
+
+            // Mood tick
+            this.mood?.update();
+
+            // Track idle time for mood
+            if (this.taskQueue.isIdle()) {
+                if (this.idleStartTime === 0) this.idleStartTime = Date.now();
+                if (Date.now() - this.idleStartTime > 60000) {
+                    this.mood?.onEvent('idle_long');
+                    this.idleStartTime = Date.now(); // reset so it only fires periodically
+                }
+            } else {
+                this.idleStartTime = 0;
+            }
 
             // Mode controller
             if (this.modes) {
@@ -207,59 +295,88 @@ class Agent {
         }, this.config.bot.reflectionInterval));
     }
 
-    async executeTask(task) {
+    getTaskHandlers() {
+        const self = this;
         const bot = this.bot;
-        switch (task.type) {
-            case 'collect': {
-                const count = task.params.count || 5;
-                const collected = await this.skills.gather.collectBlock(task.params.target, 30, count);
-                this.evolution.recordExperience('collect', task.params.target, collected > 0, `Collected ${collected}/${count}`);
-                return collected > 0;
-            }
-            case 'follow': {
-                const player = bot.players[task.params.username]?.entity;
-                if (!player) return false;
-                // Follow for up to 30 seconds at a time
-                await this.skills.movement.follow(player, 3, 30000);
-                this.evolution.recordExperience('follow', task.params.username, true, 'Followed');
-                return true;
-            }
-            case 'attack': {
-                const enemy = require('../utils/world').getNearestEntityWhere(bot, e => require('../utils/world').isHostile(e), 8);
-                if (!enemy) return false;
-                const ok = await this.skills.combat.attackEntity(enemy);
-                this.evolution.recordExperience('attack', enemy.name, ok, 'Attacked hostile');
-                return ok;
-            }
-            case 'farm': {
-                const harvested = await this.skills.farming.harvestCrops();
-                this.evolution.recordExperience('farm', 'crops', harvested > 0, `Harvested ${harvested}`);
-                return harvested > 0;
-            }
-            case 'build': {
+        return {
+            collect: async (params) => {
+                const count = params.count || 5;
+                const collected = await self.skills.gather.collectBlock(params.target, 30, count);
+                self.evolution.recordExperience('collect', params.target, collected > 0, `Collected ${collected}/${count}`);
+                return { result: collected > 0, detail: `Collected ${collected}/${count} ${params.target}` };
+            },
+            follow: async (params) => {
+                const player = bot.players[params.username]?.entity;
+                if (!player) return { result: false, detail: `Player ${params.username} not found` };
+                await self.skills.movement.follow(player, 3, 30000);
+                self.evolution.recordExperience('follow', params.username, true, 'Followed');
+                return { result: true, detail: `Followed ${params.username}` };
+            },
+            attack: async () => {
+                const world = require('../utils/world');
+                let enemy = world.getNearestEntityWhere(bot, e => world.isHostile(e), 8);
+                if (!enemy) enemy = world.getNearestEntityWhere(bot, e => world.isHuntable(e), 12);
+                if (!enemy) return { result: false, detail: 'No target' };
+                const ok = await self.skills.combat.attackEntity(enemy);
+                self.evolution.recordExperience('attack', enemy.name, ok, 'Attacked target');
+                return { result: ok, detail: `Attacked ${enemy.name}` };
+            },
+            farm: async () => {
+                const harvested = await self.skills.farming.harvestCrops();
+                self.evolution.recordExperience('farm', 'crops', harvested > 0, `Harvested ${harvested}`);
+                return { result: harvested > 0, detail: `Harvested ${harvested} crops` };
+            },
+            build: async () => {
                 const pos = bot.entity.position;
-                const placed = await this.skills.building.buildShelter(pos);
-                this.evolution.recordExperience('build', 'shelter', placed > 0, `Placed ${placed} blocks`);
-                return placed > 0;
-            }
-            case 'deposit': {
-                const ok = await this.skills.storage.deposit(task.params.items || []);
-                this.evolution.recordExperience('deposit', 'chest', ok, 'Deposited items');
-                return ok;
-            }
-            case 'withdraw': {
-                const ok = await this.skills.storage.withdraw(task.params.item, task.params.count || 1);
-                return ok;
-            }
-            case 'stop': {
-                this.taskQueue.clear();
+                const placed = await self.skills.building.buildShelter(pos);
+                self.evolution.recordExperience('build', 'shelter', placed > 0, `Placed ${placed} blocks`);
+                return { result: placed > 0, detail: `Placed ${placed} blocks` };
+            },
+            deposit: async (params) => {
+                const ok = await self.skills.storage.deposit(params.items || []);
+                self.evolution.recordExperience('deposit', 'chest', ok, 'Deposited items');
+                return { result: ok, detail: 'Deposited items' };
+            },
+            withdraw: async (params) => {
+                const ok = await self.skills.storage.withdraw(params.item, params.count || 1);
+                return { result: ok, detail: `Withdrew ${params.count || 1} ${params.item}` };
+            },
+            stop: async () => {
+                self.taskQueue.clear();
                 bot.pathfinder.stop();
                 bot.clearControlStates();
-                return true;
+                return { result: true, detail: 'Stopped' };
+            },
+            use_skill: async (params) => {
+                const ok = await self.skillRegistry.execute(params.name, params.steps);
+                return { result: ok, detail: `Executed skill ${params.name}` };
+            },
+        };
+    }
+
+    async executeTask(task) {
+        const handlers = this.getTaskHandlers();
+        const handler = handlers[task.type];
+        if (!handler) {
+            // Try dynamic skill
+            if (this.skillRegistry?.has(task.type)) {
+                const ok = await this.skillRegistry.execute(task.type);
+                if (ok) this.mood?.onEvent('completed_task', { type: task.type, detail: `Skill ${task.type}` });
+                return ok;
             }
-            default:
-                this.log(`[Task] Unknown task type: ${task.type}`);
-                return false;
+            this.log(`[Task] Unknown task type: ${task.type}`);
+            return false;
+        }
+
+        try {
+            const { result, detail } = await handler(task.params);
+            if (result) {
+                this.mood?.onEvent('completed_task', { type: task.type, detail });
+            }
+            return result;
+        } catch (e) {
+            this.log(`[Task] ${task.type} error:`, e.message);
+            return false;
         }
     }
 
@@ -305,12 +422,26 @@ class Agent {
                     this.log(`Base URL: ${this.config.ai.baseURL}`);
                 }
                 break;
+            case 'mood':
+                this.log(this.mood ? JSON.stringify(this.mood.getStatus(), null, 2) : 'No mood system');
+                break;
+            case 'idle':
+                if (args[0] === 'off') {
+                    this.config.bot.idleGoalsEnabled = false;
+                    this.log('Idle goals disabled.');
+                } else if (args[0] === 'on') {
+                    this.config.bot.idleGoalsEnabled = true;
+                    this.log('Idle goals enabled.');
+                } else {
+                    this.log(`Idle goals: ${this.config.bot.idleGoalsEnabled !== false ? 'enabled' : 'disabled'}`);
+                }
+                break;
             case 'quit':
                 this.bot?.quit();
                 process.exit(0);
                 break;
             default:
-                this.log('Commands: say <msg>, follow <player>, collect <block> [count], attack, farm, build, deposit [items...], stop, status, model [name], quit');
+                this.log('Commands: say <msg>, follow <player>, collect <block> [count], attack, farm, build, deposit [items...], stop, status, model [name], mood, idle [on|off], quit');
         }
     }
 
