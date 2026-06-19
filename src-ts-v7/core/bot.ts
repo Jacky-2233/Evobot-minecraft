@@ -12,6 +12,18 @@ import { initLLM, callLLM } from '../utils/llm.js';
 import { isFiniteVec3 } from '../utils/nan-guard.js';
 import type { BotConfig, SkillResult } from '../types/index.js';
 
+let _GoalNear: any = null;
+function getGoalNear(): any {
+    if (_GoalNear) return _GoalNear;
+    try {
+        _GoalNear = require('mineflayer-pathfinder').goals.GoalNear;
+        if (!_GoalNear) console.error('[V7] GoalNear is undefined after require');
+    } catch (e) {
+        console.error('[V7] Failed to load GoalNear:', (e as Error).message);
+    }
+    return _GoalNear;
+}
+
 type AnySkill = MoveToSkill | CollectSkill | EatSkill | RetreatSkill | CraftSkill;
 
 export class EvoBotV7 {
@@ -73,7 +85,7 @@ export class EvoBotV7 {
         });
         this.bot.on('chat', (username: string, msg: string) => {
             if (username === this.bot.username) return;
-            this.thinkAndChat(username, msg);
+            this.handleChat(username, msg);
         });
     }
 
@@ -86,6 +98,7 @@ export class EvoBotV7 {
         const { Movements } = require('mineflayer-pathfinder');
         const moves = new Movements(this.bot, mcData);
         moves.canDig = false;
+        moves.allowParkour = false;
         this.bot.pathfinder.setMovements(moves);
 
         try {
@@ -122,16 +135,15 @@ export class EvoBotV7 {
             this.bot.pathfinder?.stop();
             this.bot.clearControlStates();
             const land = this.findLand(10);
-            if (land) {
-                this.bot.pathfinder.goto(new (require('mineflayer-pathfinder').goals.GoalNear)(land.x, land.y, land.z, 2))
-                    .catch(() => {});
+            const GN = getGoalNear();
+            if (land && GN) {
+                this.bot.pathfinder.goto(new GN(land.x, land.y, land.z, 2)).catch(() => {});
             }
             return;
         }
         this._inWater = false;
 
         const health = this.bot.health ?? 20;
-        const food = this.bot.food ?? 20;
         if (health <= this.config.criticalHealthThreshold) {
             this.runSkill('retreat', { distance: 16 });
             return;
@@ -152,28 +164,31 @@ export class EvoBotV7 {
         if (action) this._taskQueue.push(action);
     }
 
-    private async askAI(): Promise<{ type: string; params: any } | null> {
+    private buildStatePrompt(): string {
         const p = this.bot.entity?.position;
         const inv = this.bot.inventory?.items()?.filter(Boolean) ?? [];
         const invStr = inv.slice(0, 8).map(i => `${(i as any).name ?? '?'} x${i.count}`).join(', ') || 'empty';
         const hostile = p ? this.findHostile(12) : null;
         const hostileStr = hostile ? `${hostile.name} ${hostile.distance.toFixed(1)}m` : 'none';
-
         const hp = ((this.bot.health ?? 20).toFixed(0));
         const fd = ((this.bot.food ?? 20).toFixed(0));
         const posStr = p ? `(${p.x.toFixed(0)}, ${p.y.toFixed(0)}, ${p.z.toFixed(0)})` : '(?, ?, ?)';
         const nearby = p ? this.bot.findBlock({ matching: (b: any) => !!b, maxDistance: 8 }) : null;
         const blockStr = nearby ? `${nearby.name}` : 'none';
+        return `HP: ${hp}/${fd}
+Pos: ${posStr}
+Inv: ${invStr}
+Hostile: ${hostileStr}
+Block ahead: ${blockStr}
+Last event: ${this._lastEvent || 'none'}`;
+    }
 
+    private async askAI(): Promise<{ type: string; params: any } | null> {
+        const state = this.buildStatePrompt();
         const prompt = `You are EvoBot v7, a Minecraft bot. Decide the next action.
 
 State:
-- HP: ${hp}/${fd}
-- Pos: ${posStr}
-- Inv: ${invStr}
-- Hostile: ${hostileStr}
-- Block ahead: ${blockStr}
-- Last event: ${this._lastEvent || 'none'}
+${state}
 
 Available actions (respond with JSON only, no explanation):
 {"do":"move_to","x":NUM,"y":NUM,"z":NUM}         — walk to coordinates
@@ -190,40 +205,83 @@ Choose wisely based on state. Prioritize: survival > tools > resources > explore
             { role: 'user', content: prompt },
         ], { maxTokens: 150, temperature: 0.3 });
 
-        this._log('think.jsonl', { type: 'decision', prompt, reply, hp, fd, posStr });
+        this._log('think.jsonl', { type: 'decision', prompt, reply });
         if (reply && reply !== '{"do":"wait"}') {
             console.log(`[think] ${reply}`);
         }
 
         if (!reply) return { type: 'wait', params: {} };
-        try {
-            const j = JSON.parse(reply);
-            if (j.do === 'wait' || !j.do) return { type: 'wait', params: {} };
-            if (j.do === 'move_to') return { type: 'move_to', params: { x: j.x, y: j.y, z: j.z, reachDistance: 2 } };
-            if (j.do === 'collect') return { type: 'collect', params: { target: j.target, count: 1 } };
-            if (j.do === 'eat') return { type: 'eat', params: {} };
-            if (j.do === 'craft') return { type: 'craft', params: { item: j.item, count: 1 } };
-            if (j.do === 'retreat') return { type: 'retreat', params: { distance: j.distance ?? 16 } };
-        } catch {}
-        return { type: 'wait', params: {} };
+        return this.parseAction(reply);
     }
 
-    private async thinkAndChat(username: string, message: string): Promise<void> {
+    /** Chat handler: LLM can both reply in text AND submit an action */
+    private async handleChat(username: string, message: string): Promise<void> {
         const p = this.bot.entity?.position;
         this._log('chat.jsonl', { type: 'user', username, message, pos: p ? { x: p.x, y: p.y, z: p.z } : null });
         console.log(`[chat] <${username}> ${message}`);
-        const prompt = `You are a Minecraft bot. Reply in 1 sentence.
-HP=${this.bot.health?.toFixed(0)} Food=${this.bot.food?.toFixed(0)} Pos=(${p?.x.toFixed(0) ?? '?'},${p?.y.toFixed(0) ?? '?'},${p?.z.toFixed(0) ?? '?'})
-Player <${username}>: "${message}"`;
+
+        const state = this.buildStatePrompt();
+        const prompt = `You are a Minecraft bot. A player is talking to you.
+
+Your state:
+${state}
+
+Player <${username}>: "${message}"
+
+Respond with JSON (no other text):
+{"reply":"your chat reply","do":"wait"} — just chat, no action
+{"reply":"ok coming!","do":"move_to","x":0,"y":64,"z":0} — chat AND move
+{"reply":"here you go","do":"collect","target":"log"} — chat AND collect
+{"reply":"on it","do":"craft","item":"wooden_pickaxe"} — chat AND craft
+{"do":"retreat","reply":"help!",distance":16} — chat AND retreat`;
+
         const reply = await callLLM([
-            { role: 'system', content: 'You are a friendly Minecraft bot. Reply in 1 short sentence.' },
+            { role: 'system', content: 'You are a Minecraft bot. Reply in JSON with "reply" (1 sentence) and optional action.' },
             { role: 'user', content: prompt },
-        ], { maxTokens: 80, temperature: 0.8 });
-        if (reply) {
+        ], { maxTokens: 200, temperature: 0.7 });
+
+        if (!reply) return;
+
+        // Try to parse JSON; if fails, treat entire reply as chat text
+        const action = this.parseAction(reply);
+        if (action) {
+            const chatMsg = (action as any)._reply || '';
+            if (chatMsg && chatMsg !== 'wait') {
+                this.bot.chat(chatMsg);
+                console.log(`[chat] <EvoBot> ${chatMsg}`);
+                this._log('chat.jsonl', { type: 'bot_reply', to: username, reply: chatMsg, rawLLM: reply });
+            }
+            // Enqueue action (skip if it's a chat-only message)
+            if (action.type !== 'wait' || (action as any)._reply) {
+                // If there's a non-wait action, enqueue it
+                if (action.type !== 'wait') {
+                    this._taskQueue = [action]; // replace queue (player command priority)
+                    console.log(`[chat] enqueued: ${action.type} ${JSON.stringify(action.params)}`);
+                }
+            }
+        } else {
+            // Failed to parse JSON — treat as plain text reply
             this.bot.chat(reply);
             console.log(`[chat] <EvoBot> ${reply}`);
-            this._log('chat.jsonl', { type: 'bot_reply', to: username, reply, prompt });
+            this._log('chat.jsonl', { type: 'bot_reply', to: username, reply, rawLLM: reply });
         }
+    }
+
+    /** Parse JSON action from LLM response */
+    private parseAction(raw: string): { type: string; params: any; _reply?: string } | null {
+        let clean = raw.replace(/```[\w]*\n?/g, '').replace(/```/g, '').trim();
+        const m = clean.match(/\{[\s\S]*\}/);
+        if (!m) return null;
+        try {
+            const j = JSON.parse(m[0]);
+            const r: any = { type: 'wait', params: {}, _reply: j.reply };
+            if (j.do === 'move_to') { r.type = 'move_to'; r.params = { x: j.x, y: j.y, z: j.z, reachDistance: 2 }; }
+            else if (j.do === 'collect') { r.type = 'collect'; r.params = { target: j.target, count: 1 }; }
+            else if (j.do === 'eat') { r.type = 'eat'; r.params = {}; }
+            else if (j.do === 'craft') { r.type = 'craft'; r.params = { item: j.item, count: 1 }; }
+            else if (j.do === 'retreat') { r.type = 'retreat'; r.params = { distance: j.distance ?? 16 }; }
+            return r;
+        } catch { return null; }
     }
 
     private async runSkill(type: string, params: any): Promise<SkillResult> {
