@@ -195,17 +195,19 @@ export function createWanderBehavior(deps: BehaviorDeps): BehaviorNode {
 }
 
 /** Find a safe land position near the bot for water escape */
-function findSafeLanding(bot: any, fromPos: any, radius: number): { x: number; y: number; z: number } | null {
+export function findSafeLanding(bot: any, fromPos: any, radius: number): { x: number; y: number; z: number } | null {
     for (let r = 2; r <= radius; r += 2) {
         for (let angle = 0; angle < 360; angle += 45) {
             const rad = angle * (Math.PI / 180);
             const tx = Math.round(fromPos.x + r * Math.cos(rad));
             const tz = Math.round(fromPos.z + r * Math.sin(rad));
             const tp = fromPos.floored().offset(tx - fromPos.x, 0, tz - fromPos.z);
+            // Feet-level block — must NOT be water/lava (air is OK — that's normal ground)
             const block = bot.blockAt(tp);
             if (!block) continue;
             const bn = block.name ?? '';
-            if (bn.includes('water') || bn.includes('lava') || bn === 'air') continue;
+            if (bn.includes('water') || bn.includes('lava')) continue;
+            // Ground below — must be solid (not air/water/lava)
             const ground = bot.blockAt(tp.offset(0, -1, 0));
             if (!ground) continue;
             const gn = ground.name ?? '';
