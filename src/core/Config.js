@@ -14,7 +14,7 @@ const DEFAULT_CONFIG = {
         apiKey: '',
         apiKeyFile: 'api_key_DO_NOT_DELETE.txt',
         baseURL: 'https://api.deepseek.com/v1',
-        model: 'deepseek-chat',
+        model: 'deepseek-v4-flash',
         maxHistory: 20,
         replyTimeout: 15000,
         maxTokens: 200,
@@ -33,9 +33,27 @@ const DEFAULT_CONFIG = {
         lowHealthThreshold: 8,
         criticalHealthThreshold: 4,
         trashItems: ['dirt', 'cobblestone', 'gravel', 'sand', 'rotten_flesh'],
+        dangerCheckEnabled: true,
+        idleGoalsEnabled: true,
+        moodEnabled: true,
     },
     evolution: {
         enabled: true,
+    },
+    vision: {
+        enabled: true,
+        apiKey: '',
+        baseURL: '',
+        model: 'kimi-v1',
+        timeout: 20000,
+        maxTokens: 200,
+    },
+    viewer: {
+        enabled: true,
+        port: 3001,
+        headless: true,
+        viewDistance: 4,
+        browserExecutable: '',
     },
 };
 

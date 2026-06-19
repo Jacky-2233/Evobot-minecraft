@@ -45,14 +45,9 @@ class InventorySkill {
 
     async equipBestTool(block) {
         if (!block) return;
-        try {
-            await this.bot.equip(block, 'hand');
-        } catch (e) {
-            // Try to find appropriate tool
-            const tool = this.findBestToolForBlock(block);
-            if (tool) {
-                await this.bot.equip(tool, 'hand').catch(() => {});
-            }
+        const tool = this.findBestToolForBlock(block);
+        if (tool) {
+            await this.bot.equip(tool, 'hand').catch(() => {});
         }
     }
 

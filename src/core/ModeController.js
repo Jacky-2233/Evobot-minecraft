@@ -6,6 +6,7 @@ class ModeController {
         this.bot = agent.bot;
         this.modes = [
             this.createSelfPreservationMode(),
+            this.createDangerAwarenessMode(),
             this.createUnstuckMode(),
             this.createCowardiceMode(),
             this.createSelfDefenseMode(),
@@ -70,10 +71,22 @@ class ModeController {
         };
     }
 
+    createDangerAwarenessMode() {
+        return {
+            name: 'danger_awareness',
+            priority: 95,
+            update: async () => {
+                if (this.agent.config.bot.dangerCheckEnabled === false) return false;
+                const result = await this.agent.danger?.reactToDanger();
+                return result?.triggered || false;
+            }
+        };
+    }
+
     createUnstuckMode() {
         return {
             name: 'unstuck',
-            priority: 90,
+            priority: 88,
             update: async () => {
                 if (this.isOnCooldown('unstuck')) return false;
                 const bot = this.bot;
@@ -193,7 +206,9 @@ class ModeController {
             priority: 0,
             update: async () => {
                 if (!this.agent.taskQueue.isIdle()) return false;
-                return false;
+                if (this.agent.config.bot.idleGoalsEnabled === false) return false;
+                const goal = await this.agent.idlePlanner?.think();
+                return !!goal;
             }
         };
     }
