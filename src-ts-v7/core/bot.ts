@@ -8,7 +8,7 @@ import { CollectSkill, type CollectParams } from '../skills/collect.js';
 import { EatSkill } from '../skills/eat.js';
 import { RetreatSkill, attackNearestHostile } from '../skills/retreat.js';
 import { CraftSkill } from '../skills/craft.js';
-import { initLLM, callLLM } from '../utils/llm.js';
+import { initLLM, callLLM, getModel, setModel } from '../utils/llm.js';
 import { isFiniteVec3 } from '../utils/nan-guard.js';
 import type { BotConfig, SkillResult } from '../types/index.js';
 
@@ -66,6 +66,9 @@ export class EvoBotV7 {
             fs.appendFileSync(path.join(dir, filename), JSON.stringify({ ts: Date.now(), ...data }) + '\n');
         } catch {}
     }
+
+    getModel(): string { return getModel(); }
+    setModel(name: string): void { setModel(name); }
 
     private setupEvents(): void {
         this.bot.once('spawn', () => this.onSpawn());
@@ -185,23 +188,30 @@ Last event: ${this._lastEvent || 'none'}`;
 
     private async askAI(): Promise<{ type: string; params: any } | null> {
         const state = this.buildStatePrompt();
+        const p = this.bot.entity?.position;
+        // Show concise state in CMD
+        const hp = ((this.bot.health ?? 20).toFixed(0));
+        const fd = ((this.bot.food ?? 20).toFixed(0));
+        const ps = p ? `(${p.x.toFixed(0)},${p.y.toFixed(0)},${p.z.toFixed(0)})` : '(?,?,?)';
+        console.log(`[think] HP=${hp} FD=${fd} Pos=${ps} Q=${this._taskQueue.length} Model=${getModel()}`);
+
         const prompt = `You are EvoBot v7, a Minecraft bot. Decide the next action.
 
 State:
 ${state}
 
-Available actions (respond with JSON only, no explanation):
-{"do":"move_to","x":NUM,"y":NUM,"z":NUM}         — walk to coordinates
-{"do":"collect","target":"log"}                   — mine nearest block matching name
-{"do":"eat"}                                      — eat food
-{"do":"craft","item":"stone_pickaxe"}             — craft item (planks/stick/crafting_table/wooden_pickaxe/stone_pickaxe/furnace)
-{"do":"retreat","distance":16}                    — run away from threats
-{"do":"wait"}                                     — do nothing this tick
+Available actions (JSON only):
+{"do":"move_to","x":NUM,"y":NUM,"z":NUM}  — walk to coordinates. ALWAYS explore if idle (pick coords 5-10 blocks away).
+{"do":"collect","target":"log"}            — mine nearest block (try: log, stone, cobblestone, coal_ore, iron_ore)
+{"do":"eat"}                               — eat food from inventory
+{"do":"craft","item":"stone_pickaxe"}       — craft item (planks, stick, crafting_table, wooden_pickaxe, stone_pickaxe, furnace)
+{"do":"retreat","distance":16}             — run from danger
+{"do":"wait"}                              — skip tick (only if busy)
 
-Choose wisely based on state. Prioritize: survival > tools > resources > explore.`;
+IMPORTANT: Never wait when idle. Always move/explore if nothing else to do. Coords must be integers.`;
 
         const reply = await callLLM([
-            { role: 'system', content: 'You are a Minecraft bot AI. Respond with ONLY valid JSON, no other text.' },
+            { role: 'system', content: 'You are a Minecraft bot AI. Respond with ONLY valid JSON, no other text. NEVER say wait when idle.' },
             { role: 'user', content: prompt },
         ], { maxTokens: 150, temperature: 0.3 });
 

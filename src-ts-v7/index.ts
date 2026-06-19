@@ -28,22 +28,37 @@ function loadConfig(): BotConfig {
     };
 }
 
-console.log('===========================');
+console.log('================================');
 console.log('  EvoBot v7 — AI Driven');
-console.log('===========================');
+console.log('================================');
 
 const core = new EvoBotV7(loadConfig());
 
-// Console commands
 if (process.stdin.isTTY) {
     const rl = require('readline').createInterface({ input: process.stdin, output: process.stdout });
     rl.on('line', (line: string) => {
         const [cmd, ...args] = line.trim().split(/\s+/);
         switch (cmd) {
             case 'say': core.bot?.chat(args.join(' ')); break;
+            case 'move':
+                core.bot?.pathfinder?.goto(
+                    new (require('mineflayer-pathfinder').goals.GoalNear)(
+                        parseFloat(args[0]) || 0, parseFloat(args[1]) || 0, parseFloat(args[2]) || 0, 2
+                    )
+                ).catch(() => {});
+                break;
+            case 'model':
+                if (!args[0]) {
+                    console.log(`Current model: ${core.getModel()}`);
+                    console.log('Usage: model <name>  (e.g. model deepseek-v4-flash)');
+                } else {
+                    core.setModel(args[0]);
+                    console.log(`Model switched to: ${args[0]}`);
+                }
+                break;
             case 'stop': core.bot?.pathfinder?.stop(); core.bot?.clearControlStates(); break;
             case 'quit': core.bot?.quit(); process.exit(0); break;
-            default: console.log('Commands: say, stop, quit');
+            default: console.log('Commands: say, move <x> <y> <z>, model [name], stop, quit');
         }
     });
     rl.setPrompt('[v7] > '); rl.prompt();
