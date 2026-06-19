@@ -35,6 +35,8 @@ export class PositionHealth {
     private _degradedUntil = 0;
     private _lastValidPos: { x: number; y: number; z: number } | null = null;
     private _nanCount = 0;
+    /** Callback when position becomes invalid — notifies Orchestrator */
+    onInvalid: (() => void) | null = null;
 
     constructor(bot: Bot, config?: Partial<PositionHealthConfig>) {
         this.bot = bot;
@@ -83,6 +85,7 @@ export class PositionHealth {
                 console.warn(`[PosHealth] NaN detected (count: ${++this._nanCount})`);
                 this._state = 'invalid';
                 this.stabilize();
+                this.onInvalid?.();
             }
             return;
         }

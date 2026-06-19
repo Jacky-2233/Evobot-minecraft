@@ -10,8 +10,8 @@ export abstract class BaseSkill<P = unknown> implements ISkill<P> {
     abstract readonly name: string;
     abstract readonly description: string;
     readonly interruptible = true;
-    readonly defaultTimeoutMs = 10000;
-    readonly maxRetries = 1;
+    readonly defaultTimeoutMs: number = 10000;
+    readonly maxRetries: number = 1;
 
     private _running = false;
     private _cancelController: AbortController | null = null;

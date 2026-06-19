@@ -184,19 +184,15 @@ export class StepExecutor {
         return this.history.slice(-limit);
     }
 
-    /** Resume a sequence from checkpoint */
-    async resumeFromCheckpoint(): Promise<StepResult | null> {
+    /** Resume a sequence from checkpoint — returns checkpoint data for caller to reconstruct steps */
+    async resumeFromCheckpoint(): Promise<StepCheckpoint | null> {
         const stepCkpt = this.checkpoint.loadStepCheckpoint();
         if (!stepCkpt) {
             return null;
         }
 
-        this.log('info', `Resuming sequence from checkpoint: ${stepCkpt.sequenceName} step ${stepCkpt.currentStepIndex}`);
-
-        // Note: We can't fully reconstruct the step sequence from checkpoint
-        // because step definitions contain functions. The caller must provide
-        // the sequence with steps already defined, and we'll set the state.
-        return null;
+        this.log('info', `Found step checkpoint: ${stepCkpt.sequenceName} at step ${stepCkpt.currentStepIndex}/${stepCkpt.progress.total}`);
+        return stepCkpt;
     }
 
     /** Save step checkpoint */

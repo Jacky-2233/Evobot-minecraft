@@ -4,9 +4,13 @@
   "description": "Self-evolving Minecraft AI agent powered by mineflayer + DeepSeek",
   "main": "bot.js",
   "scripts": {
-    "start": "node bot.js",
-    "dash": "node dashboard-cli.js",
-    "test": "node --check bot.js"
+    "start": "node v5/bot.js",
+    "start:v5": "node v5/bot.js",
+    "start:v6": "npx tsx src-ts/index.ts",
+    "dash": "node v5/dashboard-cli.js",
+    "test": "node --check v5/bot.js",
+    "test:v6": "npx tsx test-v6.ts",
+    "test:gap": "npx tsx test-gap-detector.ts"
   },
   "dependencies": {
     "express": "^5.2.1",

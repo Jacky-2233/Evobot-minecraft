@@ -15,9 +15,13 @@ import { MoveToSkill } from '../skills/movement.js';
 import { CollectSkill } from '../skills/collect.js';
 import { PickupSkill } from '../skills/pickup.js';
 import { RetreatSkill, attackNearestHostile } from '../skills/combat.js';
+import { EatSkill } from '../skills/eat.js';
+import { CraftSkill } from '../skills/craft.js';
 import { Perception } from '../layers/perception.js';
 import { Safety } from '../layers/safety.js';
 import { Memory } from '../layers/memory.js';
+import { InventoryManager } from '../layers/inventory.js';
+import { SessionStats } from '../layers/session-stats.js';
 import {
     BehaviorEngine,
     createWanderBehavior,
@@ -33,7 +37,11 @@ import { CheckpointManager } from '../layers/checkpoint.js';
 import { PositionHealth } from '../layers/position-health.js';
 import { DashboardStateProvider } from '../layers/dashboard-state.js';
 import { DashboardServer } from '../web/dashboard.js';
+import { AgentOrchestrator } from '../layers/orchestrator.js';
+import { Arbiter } from '../layers/arbiter.js';
+import { GoalManager } from '../layers/goal-manager.js';
 import { nanTracer, isFiniteVec3 } from '../utils/nan-guard.js';
+import { initLLM, callLLM } from '../utils/llm.js';
 import type { BotConfig, TaskDefinition } from '../types/index.js';
 
 export interface EvoBotCoreOptions {
@@ -57,12 +65,17 @@ export class EvoBotCore {
     private checkpoint: CheckpointManager;
     private dashboardProvider: DashboardStateProvider | null = null;
     private dashboardServer: DashboardServer | null = null;
+    private orchestrator: AgentOrchestrator;
+    private goalManager: GoalManager;
+    readonly inventoryManager: InventoryManager;
+    readonly sessionStats: SessionStats;
     private _recentCompletions: string[] = [];
     private intervals: NodeJS.Timeout[] = [];
     private running = false;
     private _reconnecting = false;
     private _reconnectAttempts = 0;
     private _nanSince = 0;
+    private _lastThink = '';
 
     constructor(options: EvoBotCoreOptions) {
         this.config = options.config;
@@ -82,6 +95,19 @@ export class EvoBotCore {
         this.memory = new Memory();
         this.checkpoint = new CheckpointManager();
         this.stepExecutor = new StepExecutor(this.bot, this.checkpoint);
+        this.goalManager = new GoalManager();
+        this.inventoryManager = new InventoryManager(this.bot);
+        this.sessionStats = new SessionStats();
+        this.orchestrator = new AgentOrchestrator({
+            bot: this.bot,
+            executor: this.executor,
+            stepExecutor: this.stepExecutor,
+            arbiter: new Arbiter(),
+            addTask: (task) => this.addTask(task as any),
+            executeStepSequence: (seq) => this.executeStepSequence(seq),
+            goalManager: this.goalManager,
+        });
+        initLLM(this.config);
 
         // DashboardStateProvider — fed references later in onSpawn
         this.dashboardProvider = new DashboardStateProvider(
@@ -93,6 +119,7 @@ export class EvoBotCore {
             this.executor,
             Date.now(),
             this.stepExecutor,
+            this.orchestrator,
         );
 
         // Register default skills
@@ -100,6 +127,8 @@ export class EvoBotCore {
         this.executor.registerSkill(new CollectSkill(this.bot));
         this.executor.registerSkill(new PickupSkill(this.bot));
         this.executor.registerSkill(new RetreatSkill(this.bot));
+        this.executor.registerSkill(new EatSkill(this.bot));
+        this.executor.registerSkill(new CraftSkill(this.bot));
 
         // Register user-provided skills
         if (options.skills) {
@@ -121,6 +150,7 @@ export class EvoBotCore {
     private onSpawn(): void {
         console.log('[Core] Spawned');
         this.running = true;
+        this.sessionStats.start();
 
         // Pathfinder movements
         const mcData = require('minecraft-data')(this.bot.version);
@@ -150,14 +180,18 @@ export class EvoBotCore {
             this.addTask({
                 type: saved.activeTask.type,
                 params: resumeParams,
-                priority: 25, // higher than normal idle to finish first
+                priority: 30,
                 source: 'resume' as any,
             });
             this._recentCompletions = saved.recentCompletions ?? [];
+            this.checkpoint.clear();
         } else {
             this.checkpoint.clear();
             this._recentCompletions = [];
         }
+
+        // ─── Resume from step checkpoint ─────────────────
+        this.checkStepCheckpointResume();
 
         // ─── Position Health ────────────────────────────
         this.positionHealth = new PositionHealth(this.bot, {
@@ -165,6 +199,8 @@ export class EvoBotCore {
             spawnDegradedMs: 5000,
         });
         this.positionHealth.markSpawned();
+        // PositionHealth → Orchestrator: invalid position cancels running execution
+        this.positionHealth.onInvalid = () => this.orchestrator.interruptAllRunning('Position invalid');
 
         // ─── Layers ──────────────────────────────────────
         this.perception = new Perception(this.bot, {
@@ -179,6 +215,9 @@ export class EvoBotCore {
             hostileEvadeDistance: 12,
         });
         this.safety.markSpawned();
+        // Safety → Orchestrator: emergency tasks through raiseEmergency
+        this.safety.onEmergency = (text, taskType, params) =>
+            this.orchestrator.raiseEmergency(text, taskType, params);
 
         // Wire executor → memory + checkpoint + events
         this.executor.onTaskStart = (task) => {
@@ -186,6 +225,7 @@ export class EvoBotCore {
         };
         this.executor.onComplete = (result) => {
             this.memory.recordTask(result);
+            this.sessionStats.recordTask(result.task.type, result.result.ok);
             const evType = result.result.ok ? 'task_ok' : 'task_fail';
             this.dashboardProvider?.pushEvent(evType, `${result.task.type}: ${result.result.detail}`);
             // Track recent completions
@@ -216,6 +256,8 @@ export class EvoBotCore {
                     this.checkpoint.save(this.bot, undefined, this._recentCompletions);
                 }
             }
+            // Notify orchestrator to process next intent
+            this.orchestrator.onExecutorComplete();
         };
 
         // Wire step executor → dashboard + memory
@@ -242,15 +284,31 @@ export class EvoBotCore {
         };
 
         // ─── Behavior Engine ────────────────────────────
+        const _behaviorLastSubmit = new Map<string, number>();
         const deps = {
             bot: this.bot,
             perception: this.perception,
             memory: this.memory,
             executor: this.executor,
+            hungerThreshold: this.config.hungerThreshold,
+            submitTask: (task: { type: string; params: Record<string, unknown>; priority: number }) => {
+                // Dedup: skip same task within 15s cooldown
+                const key = `${task.type}:${JSON.stringify(task.params)}`;
+                const last = _behaviorLastSubmit.get(key) ?? 0;
+                if (Date.now() - last < 15000) return;
+                _behaviorLastSubmit.set(key, Date.now());
+                this.orchestrator.submitIntent({
+                    source: 'auto',
+                    type: 'direct_task',
+                    text: `${task.type} ${JSON.stringify(task.params)}`,
+                    taskType: task.type,
+                    taskParams: task.params,
+                    priority: task.priority,
+                });
+            },
         };
-        const hungerThreshold = this.config.hungerThreshold;
         this.behavior = new BehaviorEngine();
-        this.behavior.register(createAutoEatBehavior({ ...deps, hungerThreshold } as any));
+        this.behavior.register(createAutoEatBehavior(deps));
         this.behavior.register(createGatherBehavior(deps));
         this.behavior.register(createPickupBehavior(deps));
         this.behavior.register(createWanderBehavior(deps));
@@ -264,6 +322,16 @@ export class EvoBotCore {
             memory: this.memory,
             executor: this.executor,
             config: this.config,
+            submitTask: (task) => {
+                this.orchestrator.submitIntent({
+                    source: 'planner',
+                    type: 'direct_task',
+                    text: `${task.type} ${JSON.stringify(task.params)}`,
+                    taskType: task.type,
+                    taskParams: task.params,
+                    priority: task.priority,
+                });
+            },
         });
 
         // ─── Gap Detector ────────────────────────────────
@@ -286,6 +354,7 @@ export class EvoBotCore {
             this.executor,
             Date.now(),
             this.stepExecutor,
+            this.orchestrator,
         );
         // Only start dashboard server once (not on reconnects)
         if (!this.dashboardServer) {
@@ -309,6 +378,11 @@ export class EvoBotCore {
                 const activeCkpt = curTask
                     ? CheckpointManager.fromTask(curTask, this.bot)
                     : undefined;
+                const ckpt = this.checkpoint.load();
+                const data = ckpt ?? { timestamp: Date.now(), botPosition: { x: 0, y: 64, z: 0 }, inventory: [], recentCompletions: [] };
+                if (this.goalManager.activeGoalId) {
+                    (data as any).activeGoalId = this.goalManager.activeGoalId;
+                }
                 this.checkpoint.save(this.bot, activeCkpt, this._recentCompletions);
             }, 5000),
         );
@@ -321,6 +395,9 @@ export class EvoBotCore {
                 // 0. Position health check — gate all movement/attack
                 this.positionHealth!.evaluate();
                 const ph = this.positionHealth!;
+
+                // 0a. Auto-toss low-value items when inventory full
+                this.inventoryManager.autoToss(5).catch(() => {});
 
                 // NaN guard — 2s tolerance, not instant disconnect
                 const pos = this.bot.entity.position;
@@ -381,12 +458,15 @@ export class EvoBotCore {
                 const behavStr = this.behavior?.activeName
                     ? ` Beh:${this.behavior.activeName}`
                     : '';
-                const phStr = this.positionHealth ? ` PH:${this.positionHealth.state[0]}` : '';
+                const phStr = this.positionHealth ? ` PH:${this.positionHealth.state}` : '';
+                const goalStr = this.goalManager.activeGoal
+                    ? ` Goal:${this.goalManager.activeGoal.description}`
+                    : '';
                 console.log(
                     `[Core] HP=${this.bot.health.toFixed(0)} Food=${this.bot.food.toFixed(0)} ` +
                     `Pos=(${p.x.toFixed(1)},${p.y.toFixed(1)},${p.z.toFixed(1)}) ` +
                     `${hostileStr} Mem=${this.memory.size} ` +
-                    `Queue=${this.executor.getQueueDepth()}${safetyStr}${behavStr}${phStr}`,
+                    `Queue=${this.executor.getQueueDepth()}${safetyStr}${behavStr}${phStr}${goalStr}`,
                 );
             }, 10000),
         );
@@ -434,6 +514,50 @@ export class EvoBotCore {
         setTimeout(() => {
             if (this.bot?.chat) this.bot.chat('EvoBot v6 online');
         }, 2000);
+
+        // ─── AI Chat listener — LLM decides what to say ──
+        this.bot.on('chat', async (username: string, message: string) => {
+            if (username === this.bot.username) return;
+            console.log(`[Chat] <${username}> ${message}`);
+
+            const hp = this.bot.health.toFixed(0);
+            const food = this.bot.food.toFixed(0);
+            const pos = this.bot.entity?.position;
+            const inv = this.bot.inventory?.items() ?? [];
+            const invStr = inv.slice(0, 5).map(i => `${i.name} x${i.count}`).join(', ') || 'empty';
+            const curTask = this.executor.getCurrentTask();
+            const taskStr = curTask ? `${curTask.type} ${JSON.stringify(curTask.params)}` : 'idle';
+            const recent = this._recentCompletions.slice(-3).join('; ') || 'none';
+
+            const prompt = [
+                `You are EvoBot, a Minecraft bot. Be friendly and concise (1-2 sentences).`,
+                ``,
+                `Your state:`,
+                `- HP: ${hp}/${food}`,
+                `- Position: (${pos?.x.toFixed(0) ?? '?'}, ${pos?.y.toFixed(0) ?? '?'}, ${pos?.z.toFixed(0) ?? '?'})`,
+                `- Inventory: ${invStr}`,
+                `- Current task: ${taskStr}`,
+                `- Recent: ${recent}`,
+                ``,
+                `Player <${username}> says: "${message}"`,
+                ``,
+                `Reply naturally, in character. Keep it short.`,
+            ].join('\n');
+
+            try {
+                const reply = await callLLM([
+                    { role: 'system', content: 'You are EvoBot, a friendly Minecraft bot. Reply in 1-2 short sentences.' },
+                    { role: 'user', content: prompt },
+                ], { maxTokens: 100, temperature: 0.8 });
+                if (reply && this.bot?.chat) {
+                    this.bot.chat(reply);
+                    console.log(`[Chat] <EvoBot> ${reply}`);
+                }
+            } catch (err: unknown) {
+                const msg = err instanceof Error ? err.message : String(err);
+                console.warn(`[Chat] LLM error: ${msg}`);
+            }
+        });
 
         // ─── Trace server-sent position updates (root cause of NaN) ──
         this.bot.on('entityMoved', (entity: any) => {
@@ -492,6 +616,7 @@ export class EvoBotCore {
         this.bot.on('death', () => {
             console.warn('[Core] Died!');
             this.memory.recordFact('Died', { position: this.bot.entity?.position });
+            this.sessionStats.recordDeath({ x: this.bot.entity?.position?.x, y: this.bot.entity?.position?.y, z: this.bot.entity?.position?.z });
             this.executor.clear();
             this.bot.pathfinder?.stop();
             this.bot.clearControlStates();
@@ -502,6 +627,7 @@ export class EvoBotCore {
 
     private onEnd(): void {
         console.log('[Core] Disconnected');
+        this.sessionStats.end();
         this.dashboardProvider?.pushEvent('disconnect', 'Server disconnected');
         // Save checkpoint before disconnect
         const curTask = this.executor.getCurrentTask();
@@ -556,6 +682,8 @@ export class EvoBotCore {
             this.executor.registerSkill(new CollectSkill(newBot));
             this.executor.registerSkill(new PickupSkill(newBot));
             this.executor.registerSkill(new RetreatSkill(newBot));
+            this.executor.registerSkill(new EatSkill(newBot));
+            this.executor.registerSkill(new CraftSkill(newBot));
 
             newBot.once('spawn', () => {
                 this._reconnecting = false;
@@ -567,6 +695,40 @@ export class EvoBotCore {
             newBot.on('end', () => this.onEnd());
             newBot.on('error', (err: Error) => console.error('[Core] Bot error:', err.message));
         }, delay);
+    }
+
+    /** Check for step-level checkpoint and resume if found */
+    private async checkStepCheckpointResume(): Promise<void> {
+        const stepCkpt = this.checkpoint.loadStepCheckpoint();
+        if (!stepCkpt) return;
+
+        const origTask = stepCkpt.originalTask;
+        if (!origTask || origTask.type !== 'collect') {
+            // Currently only collect steps support resume
+            this.checkpoint.clearStepCheckpoint();
+            return;
+        }
+
+        const params = origTask.params as Record<string, unknown>;
+        const target = (params.target as string) ?? 'log';
+        const count = ((stepCkpt.progress.total - stepCkpt.completedSteps.length) / 4) || 1; // 4 steps per block
+
+        console.log(`[Core] Resuming step sequence: ${stepCkpt.sequenceName} (completed ${stepCkpt.progress.completed}/${stepCkpt.progress.total} steps)`);
+
+        const { createCollectSteps } = await import('../skills/collect-steps.js');
+        const seq = createCollectSteps(this.bot, target, Math.max(1, Math.ceil(count)));
+
+        // Restore progress
+        seq.currentStepIndex = stepCkpt.currentStepIndex;
+        seq.state = { ...stepCkpt.state };
+        seq.originalTaskType = 'collect';
+        seq.originalTaskParams = params;
+
+        // Execute
+        this.executeStepSequence(seq).then((r) => {
+            console.log(`[Core] Step sequence resume result: ${r.ok ? 'OK' : 'FAIL'} — ${r.detail}`);
+            if (r.ok) this.checkpoint.clearStepCheckpoint();
+        });
     }
 
     /** Programmatic: add a task to the executor */
@@ -588,7 +750,19 @@ export class EvoBotCore {
     /** Plan and execute a high-level goal via LLM */
     async plan(goal: string): Promise<{ success: boolean; detail: string }> {
         if (!this.planner) return { success: false, detail: 'Planner not initialized' };
+        this.planner.onThink = (prompt, response) => {
+            const lines = response.split('\n').filter(l => l.trim());
+            for (const line of lines) {
+                console.log(`[think] ${line.trim()}`);
+            }
+            this._lastThink = response;
+        };
         return this.planner.planAndExecute(goal);
+    }
+
+    /** Get last LLM think output */
+    getLastThink(): string {
+        return this._lastThink || '(no think recorded yet. use plan command first)';
     }
 
     /** Run gap analysis and return formatted report */
@@ -627,5 +801,107 @@ export class EvoBotCore {
             this.bot.removeAllListeners();
             this.bot.quit();
         } catch {}
+    }
+
+    /** Disconnect bot but keep process alive */
+    disconnect(): void {
+        this.running = false;
+        this._reconnecting = false;
+        this.intervals.forEach(clearInterval);
+        this.intervals = [];
+        this.executor.clear();
+        this.behavior?.stop();
+        this.perception = null;
+        this.safety = null;
+        this.behavior = null;
+        this.planner = null;
+        try {
+            this.bot.removeAllListeners();
+            this.bot.quit();
+        } catch {}
+        this.dashboardProvider?.pushEvent('disconnect', 'Manual disconnect');
+        console.log('[Core] Disconnected');
+    }
+
+    /** Connect to the configured server */
+    connect(): void {
+        if (this.running) {
+            console.log('[Core] Already connected');
+            return;
+        }
+        this._reconnecting = false;
+        this._reconnectAttempts = 0;
+        this.running = false;
+        this._nanSince = 0;
+
+        const newBot = (this as any).bot = mineflayer.createBot({
+            host: this.config.host,
+            port: this.config.port,
+            username: this.config.username,
+            version: this.config.version,
+            auth: this.config.auth,
+        });
+        newBot.loadPlugin(pathfinder);
+        try { newBot.loadPlugin((autoeat as any).loader || autoeat); } catch {}
+
+        this.executor.registerSkill(new MoveToSkill(newBot));
+        this.executor.registerSkill(new CollectSkill(newBot));
+        this.executor.registerSkill(new PickupSkill(newBot));
+        this.executor.registerSkill(new RetreatSkill(newBot));
+        this.executor.registerSkill(new EatSkill(newBot));
+        this.executor.registerSkill(new CraftSkill(newBot));
+
+        newBot.once('spawn', () => {
+            this.dashboardProvider?.pushEvent('connect', `Connected to ${this.config.host}:${this.config.port}`);
+            this.onSpawn();
+        });
+        newBot.on('login', () => console.log('[Core] Logged in'));
+        newBot.on('end', () => {
+            if (this.running && !this._reconnecting) {
+                this.onEnd();
+            }
+        });
+        newBot.on('error', (err: Error) => console.error('[Core] Bot error:', err.message));
+
+        console.log(`[Core] Connecting to ${this.config.host}:${this.config.port}...`);
+    }
+
+    /** Set server address at runtime and save to config.json */
+    setServer(host: string, port: number): void {
+        this.config.host = host;
+        this.config.port = port;
+        console.log(`[Core] Server set to ${host}:${port}`);
+        try {
+            const cfgPath = require('path').join(process.cwd(), 'config.json');
+            const raw = JSON.parse(require('fs').readFileSync(cfgPath, 'utf-8'));
+            if (!raw.minecraft) raw.minecraft = {};
+            raw.minecraft.host = host;
+            raw.minecraft.port = port;
+            require('fs').writeFileSync(cfgPath, JSON.stringify(raw, null, 2));
+            console.log(`[Core] Saved to config.json`);
+        } catch (err: unknown) {
+            console.warn(`[Core] Failed to save config.json: ${err instanceof Error ? err.message : String(err)}`);
+        }
+    }
+
+    /** Get current AI model name */
+    getModel(): string {
+        return this.config.ai.model;
+    }
+
+    /** Switch AI model at runtime and save to config.json */
+    setModel(model: string): void {
+        this.config.ai.model = model;
+        console.log(`[Core] Model switched to: ${model}`);
+        try {
+            const cfgPath = require('path').join(process.cwd(), 'config.json');
+            const raw = JSON.parse(require('fs').readFileSync(cfgPath, 'utf-8'));
+            if (!raw.ai) raw.ai = {};
+            raw.ai.model = model;
+            require('fs').writeFileSync(cfgPath, JSON.stringify(raw, null, 2));
+            console.log(`[Core] Saved to config.json`);
+        } catch (err: unknown) {
+            console.warn(`[Core] Failed to save config.json: ${err instanceof Error ? err.message : String(err)}`);
+        }
     }
 }

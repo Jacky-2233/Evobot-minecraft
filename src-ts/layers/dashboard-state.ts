@@ -12,6 +12,7 @@ import type { Memory } from './memory.js';
 import type { Executor } from '../executor/executor.js';
 import type { StepExecutor } from '../executor/step-executor.js';
 import type { GapFinding } from '../types/index.js';
+import type { AgentOrchestrator } from './orchestrator.js';
 
 export interface DashboardState {
     bot: {
@@ -66,6 +67,20 @@ export interface DashboardState {
     recentEvents: DashboardEvent[];
     recentFailures: DashboardFailure[];
     gapFindings: DashboardGapFinding[];
+    goal?: {
+        activeId: string | null;
+        activeDescription: string;
+        activeType: string;
+        pendingCount: number;
+        queue: Array<{ id: string; description: string; type: string }>;
+    };
+    control?: {
+        owner: string;
+        taskType: string;
+        lastForceAcquireReason: string;
+        lastInterruptReason: string | null;
+        acquiredAt: number;
+    };
 }
 
 export interface DashboardEvent {
@@ -98,6 +113,7 @@ export class DashboardStateProvider {
     private memory: Memory;
     private executor: Executor;
     private stepExecutor: StepExecutor | null;
+    private orchestrator: AgentOrchestrator | null;
     private coreStartTime: number;
 
     private _recentEvents: DashboardEvent[] = [];
@@ -111,6 +127,7 @@ export class DashboardStateProvider {
         executor: Executor,
         coreStartTime: number,
         stepExecutor?: StepExecutor,
+        orchestrator?: AgentOrchestrator,
     ) {
         this.bot = bot;
         this.positionHealth = positionHealth;
@@ -119,6 +136,7 @@ export class DashboardStateProvider {
         this.memory = memory;
         this.executor = executor;
         this.stepExecutor = stepExecutor ?? null;
+        this.orchestrator = orchestrator ?? null;
         this.coreStartTime = coreStartTime;
     }
 
@@ -126,6 +144,11 @@ export class DashboardStateProvider {
     pushEvent(type: string, message: string): void {
         this._recentEvents.unshift({ at: Date.now(), type, message });
         if (this._recentEvents.length > 50) this._recentEvents = this._recentEvents.slice(0, 50);
+    }
+
+    /** Get recent events for Commander input */
+    getRecentEvents(limit = 10): DashboardEvent[] {
+        return this._recentEvents.slice(0, limit);
     }
 
     /** Build the full dashboard state snapshot */
@@ -235,6 +258,28 @@ export class DashboardStateProvider {
             }
             : undefined;
 
+        const goalInfo = this.orchestrator
+            ? {
+                activeId: (this.orchestrator as any)?._goalManager?.activeGoalId ?? null,
+                activeDescription: (this.orchestrator as any)?._goalManager?.activeGoal?.description ?? 'none',
+                activeType: (this.orchestrator as any)?._goalManager?.activeGoal?.type ?? 'none',
+                pendingCount: (this.orchestrator as any)?._goalManager?.pendingGoals?.length ?? 0,
+                queue: ((this.orchestrator as any)?._goalManager?.pendingGoals ?? []).slice(0, 5).map(
+                    (g: any) => ({ id: g.id, description: g.description, type: g.type })
+                ),
+            }
+            : undefined;
+
+        const controlInfo = this.orchestrator
+            ? {
+                owner: this.orchestrator.actionControl.owner,
+                taskType: this.orchestrator.actionControl.lockState.taskType ?? '',
+                lastForceAcquireReason: this.orchestrator.actionControl.lastForceAcquireReason,
+                lastInterruptReason: this.orchestrator.lastInterruptReason,
+                acquiredAt: this.orchestrator.actionControl.acquiredAt,
+            }
+            : undefined;
+
         return {
             bot: botInfo,
             survival,
@@ -246,6 +291,8 @@ export class DashboardStateProvider {
             recentEvents: this._recentEvents.slice(0, 30),
             recentFailures,
             gapFindings,
+            goal: goalInfo,
+            control: controlInfo,
         };
     }
 }

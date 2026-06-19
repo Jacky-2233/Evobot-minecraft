@@ -77,6 +77,8 @@ export interface TaskDefinition {
   createdAt: number;
   expiresAt?: number;
   source: 'ai' | 'console' | 'idle' | 'planner' | 'behavior' | 'step_executor';
+  /** Optional goal this task belongs to */
+  goalId?: string;
 }
 
 export interface TaskResult {
@@ -307,6 +309,8 @@ export interface TaskCheckpoint {
   startPosition: Vec3;
   /** Source of the task */
   source: string;
+  /** Optional goal this checkpoint belongs to */
+  goalId?: string;
 }
 
 export interface Checkpoint {
@@ -315,6 +319,8 @@ export interface Checkpoint {
   inventory: string[];
   /** Current active task, if any */
   activeTask?: TaskCheckpoint;
+  /** Current active goal, if any */
+  activeGoalId?: string;
   /** Last few completed task summaries for context */
   recentCompletions: string[];
 }
@@ -425,6 +431,24 @@ export interface StepCheckpoint {
 export interface EnhancedCheckpoint extends Checkpoint {
   /** Step-level checkpoint (if executing a step sequence) */
   stepCheckpoint?: StepCheckpoint;
+}
+
+// ─── Goal Types ──────────────────────────────────────────
+export type GoalStatus = 'pending' | 'active' | 'paused' | 'completed' | 'failed' | 'cancelled';
+export type GoalPriority = 'survival' | 'user' | 'autonomous';
+
+export interface Goal {
+  id: string;
+  type: GoalPriority;
+  description: string;
+  status: GoalStatus;
+  createdAt: number;
+  activatedAt?: number;
+  completedAt?: number;
+  failReason?: string;
+  /** Task IDs that belong to this goal */
+  taskIds: string[];
+  metadata: Record<string, unknown>;
 }
 
 /** Helper: Create a step definition */

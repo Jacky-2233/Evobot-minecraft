@@ -1,8 +1,9 @@
 /**
  * Safety Layer
  *
- * Monitors danger conditions every tick. Pauses executor and
- * injects survival tasks when necessary.
+ * Monitors danger conditions every tick. Can force-cancel (pathfinder.stop,
+ * clearControlStates) for immediate safety. Task enqueuing goes through
+ * raiseEmergency callback to Orchestrator.
  */
 import type { Bot } from 'mineflayer';
 import { Perception } from './perception.js';
@@ -15,7 +16,6 @@ export interface SafetyConfig {
     criticalHealthThreshold: number;
     stuckTimeoutMs: number;
     hostileEvadeDistance: number;
-    /** Minimum movement in blocks to not be considered stuck */
     stuckMinDistance: number;
 }
 
@@ -32,6 +32,8 @@ export class Safety {
     private bot: Bot;
     private perception: Perception;
     private config: SafetyConfig;
+    /** Callback to Orchestrator for emergency tasks */
+    private _raiseEmergency: ((text: string, taskType: string, params: Record<string, unknown>) => void) | null = null;
 
     private _pausedUntil = 0;
     private _lastMoveMs = 0;
@@ -49,6 +51,11 @@ export class Safety {
         this.bot = bot;
         this.perception = perception;
         this.config = { ...DEFAULT_CONFIG, ...config };
+    }
+
+    /** Set callback for emergency task submission (called by Orchestrator) */
+    set onEmergency(cb: ((text: string, taskType: string, params: Record<string, unknown>) => void) | null) {
+        this._raiseEmergency = cb;
     }
 
     /** Called after spawn to set a grace period */
@@ -71,19 +78,12 @@ export class Safety {
         const hostile = this.perception.getClosestHostile();
         if (hostile) {
             console.warn(`[Safety] Damaged by ${hostile.name} — retreating!`);
-            executor.enqueue({
-                id: `safety-damage-${now.toString(36)}`,
-                type: 'retreat',
-                params: {
-                    distance: 16,
-                    from: hostile.position,
-                },
-                priority: Priority.SURVIVAL,
-                source: 'behavior',
-                createdAt: now,
+            this._raiseEmergency?.('Damaged by hostile', 'retreat', {
+                distance: 16,
+                from: hostile.position,
             });
         } else {
-            this.evadeHostiles(executor);
+            this.evadeHostiles();
         }
     }
 
@@ -96,20 +96,15 @@ export class Safety {
         const summary = this.perception.scan();
         const now = Date.now();
 
-        // Grace period after spawn — skip all checks
         if (now < this._spawnGraceUntil) return;
-
-        // If a safety task is still active, don't pile on
         if (this._safetyTaskActive && now < this._pausedUntil) return;
 
-        // Update movement tracking
         const pos = this.bot.entity?.position;
         if (pos && this._lastPos) {
             const dx = pos.x - this._lastPos.x;
             const dy = pos.y - this._lastPos.y;
             const dz = pos.z - this._lastPos.z;
             const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-
             if (dist > 0.15) {
                 this._lastMoveMs = now;
                 this._lastPos = { x: pos.x, y: pos.y, z: pos.z };
@@ -120,44 +115,34 @@ export class Safety {
             this._lastMoveMs = now;
         }
 
-        // 1. Critical health: log out / idle
         if (summary.health <= this.config.criticalHealthThreshold) {
-            if (this._recoveryPhase !== 'evade') {
-                console.warn('[Safety] CRITICAL health — evading');
-            }
+            if (this._recoveryPhase !== 'evade') console.warn('[Safety] CRITICAL health — evading');
             this._recoveryPhase = 'evade';
             this._safetyTaskActive = true;
-            this.evadeHostiles(executor);
+            this.evadeHostiles();
             this._pausedUntil = now + 12000;
             return;
         }
 
-        // 2. Hostile nearby
         const closestHostile = this.perception.getClosestHostile();
         if (closestHostile && closestHostile.distance <= this.config.hostileEvadeDistance) {
-            if (this._recoveryPhase !== 'evade') {
-                console.warn(`[Safety] ${closestHostile.name} ${closestHostile.distance.toFixed(1)}m — evading`);
-            }
+            if (this._recoveryPhase !== 'evade') console.warn(`[Safety] ${closestHostile.name} ${closestHostile.distance.toFixed(1)}m — evading`);
             this._recoveryPhase = 'evade';
             this._safetyTaskActive = true;
-            this.evadeHostiles(executor);
+            this.evadeHostiles();
             this._pausedUntil = now + 10000;
             return;
         }
 
-        // 3. Low hunger
         if (summary.food <= this.config.hungerThreshold && summary.food > 0) {
-            if (this._recoveryPhase !== 'eat') {
-                console.warn(`[Safety] Hunger ${summary.food} — eating`);
-            }
+            if (this._recoveryPhase !== 'eat') console.warn(`[Safety] Hunger ${summary.food} — eating`);
             this._recoveryPhase = 'eat';
             this._safetyTaskActive = true;
-            this.eatFood(executor);
+            this.eatFood();
             this._pausedUntil = now + 6000;
             return;
         }
 
-        // 4. Stuck detection
         if (now - this._lastMoveMs > this.config.stuckTimeoutMs) {
             if (!this._stuckWarned) {
                 console.warn(`[Safety] Stuck for ${((now - this._lastMoveMs) / 1000).toFixed(0)}s — recovering`);
@@ -165,12 +150,11 @@ export class Safety {
             }
             this._recoveryPhase = 'unstuck';
             this._safetyTaskActive = true;
-            this.unstuck(executor);
+            this.unstuck();
             this._pausedUntil = now + 6000;
             return;
         }
 
-        // All clear
         if (this._recoveryPhase !== 'none') {
             console.log('[Safety] Recovery complete, resuming normal operation');
         }
@@ -179,55 +163,35 @@ export class Safety {
         this._safetyTaskActive = false;
     }
 
-    private evadeHostiles(executor: Executor): void {
+    private evadeHostiles(): void {
+        // Safety can force-cancel body control immediately
         this.bot.pathfinder?.stop();
         this.bot.clearControlStates();
 
         const hostile = this.perception.getClosestHostile();
         if (!hostile) return;
 
-        executor.enqueue({
-            id: `safety-evade-${Date.now().toString(36)}`,
-            type: 'retreat',
-            params: {
-                distance: 16,
-                from: hostile.position,
-            },
-            priority: Priority.SAFETY,
-            source: 'behavior',
-            createdAt: Date.now(),
+        this._raiseEmergency?.('Evading hostile', 'retreat', {
+            distance: 16,
+            from: hostile.position,
         });
     }
 
-    private eatFood(executor: Executor): void {
-        executor.enqueue({
-            id: `safety-eat-${Date.now().toString(36)}`,
-            type: 'eat',
-            params: {},
-            priority: Priority.SURVIVAL,
-            source: 'behavior',
-            createdAt: Date.now(),
-        });
+    private eatFood(): void {
+        this._raiseEmergency?.('Hunger low', 'eat', {});
     }
 
-    private unstuck(executor: Executor): void {
+    private unstuck(): void {
         this.bot.pathfinder?.stop();
         const randomOffset = () => 2 + Math.random() * 4;
         const pos = this.bot.entity.position;
 
-        executor.enqueue({
-            id: `safety-unstuck-${Date.now().toString(36)}`,
-            type: 'move_to',
-            params: {
-                x: pos.x + randomOffset(),
-                y: pos.y,
-                z: pos.z + randomOffset(),
-                reachDistance: 2,
-                timeoutMs: 8000,
-            },
-            priority: Priority.STUCK_RECOVERY,
-            source: 'behavior',
-            createdAt: Date.now(),
+        this._raiseEmergency?.('Stuck recovery', 'move_to', {
+            x: pos.x + randomOffset(),
+            y: pos.y,
+            z: pos.z + randomOffset(),
+            reachDistance: 2,
+            timeoutMs: 8000,
         });
     }
 }

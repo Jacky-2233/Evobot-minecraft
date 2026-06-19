@@ -2,7 +2,7 @@
 
 > 最后更新：2026-06-19  
 > 双版本并存：`v5`（`src/`、`bot.js`）| `v6`（`src-ts/`）  
-> 当前阶段：Phase 2 真实环境校准
+> 当前阶段：Phase 4 (GoalManager)
 
 ---
 
@@ -11,11 +11,10 @@
 1. [项目概述](#1-项目概述)
 2. [环境与现实约束](#2-环境与现实约束)
 3. [v6 架构](#3-v6-架构)
-4. [已完成的模块](#4-已完成的模块)
+4. [能力路线图（6层）](#4-能力路线图6层)
 5. [关键设计决策](#5-关键设计决策)
 6. [启动方式](#6-启动方式)
 7. [开发命令](#7-开发命令)
-8. [待办事项](#8-待办事项)
 
 ---
 
@@ -53,92 +52,149 @@ v6 TS → 分层架构，先做稳定性，再做智能化
 
 ```
 src-ts/
-├── types/index.ts          # 完整类型系统
+├── index.ts                # 启动入口 (配置加载+控制台命令)
+├── core/bot.ts             # 核心入口 (bot初始化+层串联+重连)
+├── types/index.ts          # 完整类型系统 (含 Goal/StepSequence)
+├── executor/               # 任务执行器
+│   ├── executor.ts         #   优先级队列任务执行器
+│   └── step-executor.ts    #   短步执行器 (5s原子步+断线续传)
 ├── skills/                 # 确定性底层技能
 │   ├── base.ts             #   BaseSkill 抽象类 (timeout/retry/cancel)
 │   ├── movement.ts         #   MoveToSkill (NaN guard, pathfinding)
-│   ├── collect.ts          #   CollectSkill (block scan, tool equip)
+│   ├── collect.ts          #   CollectSkill (block scan, dig stance)
+│   ├── collect-steps.ts    #   Step-based collect (原子步, 断线续传)
 │   ├── pickup.ts           #   PickupSkill (dropped item scan+collect)
-│   └── combat.ts           #   RetreatSkill + attackNearestHostile
-├── executor/executor.ts    # 优先级队列任务执行器
-├── layers/                 # 功能层（不依赖启动顺序）
-│   ├── perception.ts       #   世界感知 (实体/方块/时间扫描)
+│   ├── combat.ts           #   RetreatSkill + attackNearestHostile
+│   ├── eat.ts              #   EatSkill (手动进食)
+│   └── dig/
+│       └── dig-stance-planner.ts  # 站位规划器
+├── layers/                 # 功能层
+│   ├── orchestrator.ts     #   统一调度层 (submitIntent/intents队列/锁管理)
+│   ├── action-controller.ts#   身体控制权锁 (谁在控制body)
+│   ├── arbiter.ts          #   安全仲裁 (veto/approve intent)
+│   ├── goal-manager.ts     #   目标管理 (生命周期/优先级排序)
+│   ├── commander.ts        #   AI Commander (LLM决策下一步)
+│   ├── behavior.ts         #   行为引擎 (闲逛/采集/自动吃/社交/pickup)
 │   ├── safety.ts           #   安全层 (敌对规避/卡死恢复/饥饿)
 │   ├── position-health.ts  #   位置状态机 (trusted/degraded/invalid)
-│   ├── checkpoint.ts       #   检查点管理 (save/load/resume)
+│   ├── checkpoint.ts       #   检查点管理 (save/load/resume, step支持)
 │   ├── memory.ts           #   记忆层 (失败/成功记录/查询)
-│   ├── behavior.ts         #   行为引擎 (闲逛/采集/自动吃/社交/pickup)
+│   ├── perception.ts       #   世界感知 (实体/方块/时间扫描)
+│   ├── planner.ts          #   LLM规划器 (目标→计划生成+复盘)
 │   ├── gap-detector.ts     #   技能缺口检测器 (6级规则分类)
 │   ├── spec-generator.ts   #   Spec生成器 (GapFinding→SkillSpec)
-│   ├── planner.ts          #   LLM规划器 (目标→计划生成+复盘)
-│   └── dashboard-state.ts  #   仪表板状态聚合器
-├── web/dashboard.ts        # 仪表板 HTTP+WS 服务器 (7面板HTML)
-├── utils/
-│   └── nan-guard.ts        # isFiniteVec3, NaNTracer (20条环形缓冲)
-├── core/bot.ts             # 核心入口 (bot初始化+层串联+重连)
-└── index.ts                # 启动入口 (配置加载+控制台命令)
+│   └── dashboard-state.ts  #   仪表板状态聚合器 (含goal/control)
+├── web/dashboard.ts        # 仪表板 HTTP+WS 服务器 (含goal/control面板)
+└── utils/
+    ├── nan-guard.ts        # isFiniteVec3, NaNTracer (20条环形缓冲)
+    └── llm.ts              # 共享 LLM 客户端
 ```
 
 ### 层间数据流
 
 ```
-Planner (LLM, 高层) → Behavior Engine (规则, 中断时) → Safety (生存, 暂停下层)
-                                                              ↓
-Perception → PositionHealth → Executor → Skills (move/collect/pickup/retreat)
-                                        ↓
-                              Memory ← Checkpoint (5s/断连 落盘)
-                                ↓
-                          GapDetector → SpecGenerator
-                                ↓
-                          Dashboard (HTTP:3000, 7面板)
+Commander (LLM, 规则) → GoalManager → Orchestrator → Executor → Skills
+                              ↑              ↑
+                        Behavior → submitTask/Intent
+                        Safety → raiseEmergency → forceAcquire
+                        PositionHealth → onInvalid → interruptAllRunning
+                              ↓
+                        Memory ← Checkpoint ← GapDetector → SpecGenerator
+                              ↓
+                        Dashboard (HTTP:3000)
 ```
+
+**控制原则**：
+- 普通任务：`submitIntent()` → Orchestrator 统一排队
+- 紧急刹车：Safety/PH 直接停 body（pathfinder.stop/clearControlStates）
+- 安全通知：停完后通过 `raiseEmergency` / `onInvalid` 通知 Orchestrator
+- 锁机制：ActionController 保证同一时刻只有一个控制源
 
 ---
 
-## 4. 已完成的模块
+## 4. 能力路线图（6层）
 
-### 4.1 技能系统
-| 技能 | 文件 | 描述 |
+### Level 1 — 自己活着（生存层）
+> 目标是：bot 在任何情况下优先保证自己存活
+
+| 能力 | 状态 | 实现 |
 |------|------|------|
-| `move_to` | `skills/movement.ts` | 路径导航至坐标，NaN守卫，卡死检测，信号取消 |
-| `collect` | `skills/collect.ts` | 特定方块的挖掘采集，工具换装，dig 重试 |
-| `pickup` | `skills/pickup.ts` | 扫描并拾取附近掉落物实体 |
-| `retreat` | `skills/combat.ts` | 远离危险；`attackNearestHostile` 内联函数 |
+| 吃饭 | ✅ | `mineflayer-auto-eat` + `EatSkill` + Behavior `auto_eat` |
+| 避险 | ✅ | Safety 层：敌对规避、伤害响应 |
+| 逃跑 | ✅ | `RetreatSkill`（远离危险）+ `attackNearestHostile` |
+| 夜晚不乱死 | ✅ | Perception 日夜检测 + Behavior 避夜（pending refined） |
+| 断线能恢复 | ✅ | 指数退避重连 + Checkpoint save/load/resume |
+| 避水 | ✅ | Wander 目标过滤 + 水中逃生 `findSafeLanding` |
 
-### 4.2 执行器
-- 优先级队列（SURVIVAL 100 → IDLE 0）
-- 单任务执行（安全第一）
-- `onTaskStart` / `onComplete` 回调（用于 memory + dashboard + checkpoint）
-- 当 PositionHealth 为 invalid 时取消当前任务
+### Level 2 — 自己做基础事（技能层）
+> bot 能独立完成基础生存和资源获取
 
-### 4.3 功能层
-| 层 | 文件 | 关键特性 |
-|-----|------|------------|
-| Perception | `perception.ts` | 实体扫描（敌对/玩家/动物/物品分类），方块扫描（按名称分组），日夜检测 |
-| Safety | `safety.ts` | 敌对规避、卡死恢复、饥饿处理、伤害处理（`onDamaged`），生成宽限期 10秒 |
-| PositionHealth | `position-health.ts` | 3 状态机：trusted→degraded→invalid；invalid 时阻止所有危险操作；自动恢复：invalid→degraded(3s)→trusted |
-| Checkpoint | `checkpoint.ts` | `logs/checkpoint.json`；每5秒 + 断开连接时保存；生成时恢复未完成任务 |
-| Memory | `memory.ts` | task 成功/失败、gap 报告、事实、策略条目；10分钟窗口查询 |
-| Behavior | `behavior.ts` | 优先级行为：自动吃饭、采集、闲逛、社交、拾取掉落物 |
-| GapDetector | `gap-detector.ts` | **8/8 校准通过**；6级规则分类链；debugReason 审计跟踪；jsonl 落盘 `logs/gap-reports.jsonl` |
-| SpecGenerator | `spec-generator.ts` | 6 套 gap 签名模板 → 结构化 SkillSpec；`spec [mins]` 控制台命令 |
-| Planner | `planner.ts` | LLM 目标→计划生成+复盘+重规划 |
-| Dashboard | `web/dashboard.ts` | 仪表板服务器位于 `http://localhost:3000`；实时状态 + 7面板 HTML；`/api/state` 端点 |
+| 能力 | 状态 | 实现 |
+|------|------|------|
+| 采木 | ✅ | `CollectSkill` + `collect-steps`（断线续采） |
+| 采石 | ✅ | `CollectSkill`（任何方块） |
+| 采煤 | ✅ | `CollectSkill` + Perception 扫描 |
+| 采铁 | 🔄 | 同上，需铁镐前置（Level 2 前置条件） |
+| 合成工具 | ❌ | 需要 CraftSkill（未实现） |
+| 整理背包 | ❌ | 需要 InventoryManager（未实现） |
+| 自动拾取 | ✅ | `PickupSkill` + Behavior `pickup` |
 
-### 4.4 稳定性基础设施
-| 特性 | 描述 |
-|------|------|
-| 指数退避重连 | 5→10→20→40→80→120s，生成时重置 |
-| 自动进食 | `mineflayer-auto-eat`（`.loader` 导出） |
-| NaN 追踪器 | 20条环形缓冲区，NaN 时转储 |
-| `isFiniteVec3` | attack/lookAt/pathfinder.setGoal 守卫 |
-| physicsTick NaN 容忍 | 2秒恢复窗口，零速度，清除控制状态 |
-| 健康处理器错误保护 | try-catch 围绕整个 health 事件处理器 |
+### Level 3 — 自己持续完成目标（目标层）
+> 设定目标后能自主分解、执行、累积进度
 
-### 4.5 测试
-| 测试 | 文件 | 结果 |
-|------|------|--------|
-| Gap Detector 校准 | `test-gap-detector.ts` | 8/8 通过 + SpecGenerator 签名验证 |
+| 能力 | 状态 | 实现 |
+|------|------|------|
+| 设定目标 | ✅ | `plan <goal>` + LLM Planner |
+| 目标生命周期 | ✅ | GoalManager：add/set/pause/complete/fail |
+| 目标优先级排序 | ✅ | GoalManager `selectNext()`：survival > user > autonomous |
+| 目标分解为任务 | ✅ | Planner `planAndExecute` |
+| 失败后重试/改路 | ✅ | Executor retry + Arbiter 冷却 |
+| 长时间累积进度 | ✅ | Checkpoint（每5s + 断线自动保存） |
+| 断线续跑目标 | ✅ | Checkpoint resume + step-checkpoint |
+| 没目标时自动兜底 | ✅ | GoalManager `generateIdleGoal()` → wander/gather |
+
+### Level 4 — 自己处理异常（韧性层）
+> 遇到异常时能降级恢复，不卡死
+
+| 能力 | 状态 | 实现 |
+|------|------|------|
+| 卡住能恢复 | ✅ | Safety unstuck：180s 不动 → clear + 重试 |
+| 目标丢了能重找 | ✅ | Behavior/pickup 找不到目标 → 冷却后重扫 |
+| 断线能续跑 | ✅ | Checkpoint + step-executor 断线续传 |
+| NaN 能降级和恢复 | ✅ | PositionHealth 状态机：invalid→degraded(3s)→trusted |
+| 身体控制权不打架 | ✅ | ActionController + Orchestrator 统一调度 |
+| Safety 抢锁后通知 | ✅ | Safety `raiseEmergency` → Orchestrator |
+| 紧急停止链路完整 | ✅ | 每个直接 stop 都有事件回调 |
+| 服务端换 IP | ✅ | `server <host> <port>` 运行时切换 |
+
+### Level 5 — 自己发现能力缺口（诊断层）
+> 知道自己哪里老失败，区分原因，生成改进方案
+
+| 能力 | 状态 | 实现 |
+|------|------|------|
+| 聚类失败模式 | ✅ | GapDetector：按 actionKey + failureType 聚类 |
+| 区分参数问题 | ✅ | `no_gap_param_issue`：timeout 多但偶尔成功 |
+| 区分 precondition | ✅ | `no_gap_precondition`：秒拒 + not_possible |
+| 区分 planner 问题 | ✅ | `no_gap_planner_issue`：source=planner + 高耗时失败 |
+| 识别真 skill gap | ✅ | `skill_gap`：纯失败无成功 + 需新能力 |
+| 过滤环境噪音 | ✅ | `environment_noise`：样本太少/混合失败类型 |
+| 生成 skill spec | ✅ | SpecGenerator：6 套模板 → 结构化 SkillSpec |
+| 校准测试 | ✅ | 8/8 场景测试通过 |
+
+### Level 6 — 自己长期成长（学习层）
+> 记住经验、调参数、逐步补技能库
+
+| 能力 | 状态 | 实现 |
+|------|------|------|
+| 记忆失败/成功 | ✅ | Memory 层（10分钟窗口查询） |
+| 事实记录 | ✅ | Memory：`recordFact`（位置、死亡等） |
+| 策略条目 | ✅ | Memory：`recordStrategy`（什么策略有效） |
+| 搜索记忆 | ✅ | `search <q>` 控制台命令 |
+| 自动调整参数 | ❌ | 需要调参循环（pending） |
+| gap→spec→review 闭环 | ❌ | 半自动，需要人工 merge（pending） |
+| 长期世界记忆 | ❌ | 箱子点、家园点、资源趋势（pending） |
+| session 统计 | ❌ | 平均在线时长、每次在线收益（pending） |
+| 自动化 skill 管道 | ❌ | dev agent 实现 + 沙盒 + merge（pending） |
 
 ---
 
@@ -160,6 +216,12 @@ Perception → PositionHealth → Executor → Skills (move/collect/pickup/retre
 - 恢复时，剩余计数被重新入队
 - 当任务完全完成时清除检查点
 
+### 控制流原则
+- **One body, one driver**：只有 Orchestrator 能下发任务给 Executor
+- Safety/PH 可以紧急停 body（`pathfinder.stop` / `clearControlStates`），但不能开路线
+- 紧急停完后必须通知 Orchestrator（`raiseEmergency` / `onInvalid`）
+- ActionController 锁防止多个模块抢身体
+
 ### 双版本策略
 - `v5`（`src/`、`bot.js`）— 生产就绪，全功能
 - `v6`（`src-ts/`）— TypeScript 分层架构，稳定性优先
@@ -170,17 +232,17 @@ Perception → PositionHealth → Executor → Skills (move/collect/pickup/retre
 
 ```bash
 # v6 TypeScript（当前开发）
-npx tsx src-ts/index.ts
+npm run start:v6          # 或 start-v6.cmd --check
 
 # v5 JavaScript（生产）
-node bot.js
+npm start                 # 或 npm run start:v5
 
 # 仪表板（v5/v6 均可在 http://localhost:3000 访问）
 # 在 v6 中，仪表板随 bot 自动启动
-# 在 v5 中，仪表板由 src/web/Dashboard.js 在 Agent.js 中启动
 
 # 运行测试
-npx tsx test-gap-detector.ts
+npm run test:v6           # v6 综合测试 (5/5)
+npm run test:gap          # Gap Detector 校准测试 (8/8)
 ```
 
 ### 控制台命令（v6）
@@ -188,13 +250,20 @@ npx tsx test-gap-detector.ts
 say <msg>    聊天消息
 move x y z   导航至坐标
 collect <block> [count]    采集方块
+collect2 <block> [count]   短步采集(原子步,断线续传)
 scan         显示感知摘要
 mem          显示记忆上下文
 gap [mins|raw|top]   缺口分析
 spec [mins]  生成 skill spec
 search <q>   搜索记忆
 stop         停止当前任务
-status       显示队列/记忆/安全状态
+status       显示完整状态(任务/行为/step执行器/安全层/目标/控制权)
+model <name> 查看/切换 LLM 模型
+start        连接服务器
+disconnect   断开 bot (不退出进程)
+server <host> <port>   切换服务器地址
+think        显示上次 LLM 响应
+plan <goal>  AI规划(显示[think]推理过程)
 quit         关闭
 ```
 
@@ -204,33 +273,17 @@ quit         关闭
 
 ```bash
 # 类型检查
-npx tsx --check src-ts/index.ts
+npx tsc --noEmit
 
-# 运行校准测试
+# 运行测试
+npx tsx test-v6.ts
 npx tsx test-gap-detector.ts
+
+# 启动带检查
+start-v6.cmd --check
 
 # 检查日志
 Get-Content -LiteralPath "logs/gap-reports.jsonl" -Tail 5
 Get-Content -LiteralPath "logs/checkpoint.json"
+Get-Content -LiteralPath "logs/step-checkpoint.json"
 ```
-
----
-
-## 8. 待办事项
-
-### 短期（Phase 2 — 当前）
-- [ ] 真实环境运行 1~3 天，收集真实 gap 报告
-- [ ] 人工筛选高价值 skill_gap 发现
-- [ ] 校准 PositionHealth 行为边界
-
-### 中期（Phase 3）
-- [ ] Planner 读取 recent gap report 避开高风险动作
-- [ ] 将从真实环境确认的 skill_gap 转为 spec
-- [ ] 由开发 agent 实现新 skill，沙盒测试，人工合并
-
-### 后续
-- [ ] 短步执行器（子 token 任务切片）
-- [ ] 长期世界记忆（家园点、箱子点、资源点）
-- [ ] 资源趋势仪表板
-- [ ] Session 统计（平均在线时长、每次在线收益）
-- [ ] 自动化 skill 验证管道
