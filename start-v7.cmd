@@ -1,4 +1,5 @@
-@echo off
+﻿@echo off
+chcp 65001 >nul
 title EvoBot v7 — AI Driven
 color 0B
 cd /d "%~dp0"
@@ -48,7 +49,7 @@ npx tsx src-ts-v7/index.ts
 if errorlevel 1 (
     echo.
     echo [WARN] Bot exited with error code %errorlevel%
-    echo Restarting in 3 seconds... (Ctrl+C to stop)
+    echo Restarting in 3 seconds... ^(Ctrl+C to stop^)
     timeout /t 3 /nobreak >nul
     goto start
 )
