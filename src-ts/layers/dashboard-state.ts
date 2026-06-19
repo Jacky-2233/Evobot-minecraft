@@ -71,6 +71,7 @@ export interface DashboardState {
         activeId: string | null;
         activeDescription: string;
         activeType: string;
+        progress?: number;
         pendingCount: number;
         queue: Array<{ id: string; description: string; type: string }>;
     };
@@ -263,6 +264,7 @@ export class DashboardStateProvider {
                 activeId: (this.orchestrator as any)?._goalManager?.activeGoalId ?? null,
                 activeDescription: (this.orchestrator as any)?._goalManager?.activeGoal?.description ?? 'none',
                 activeType: (this.orchestrator as any)?._goalManager?.activeGoal?.type ?? 'none',
+                progress: (this.orchestrator as any)?._goalManager?.activeGoal?.progress ?? 0,
                 pendingCount: (this.orchestrator as any)?._goalManager?.pendingGoals?.length ?? 0,
                 queue: ((this.orchestrator as any)?._goalManager?.pendingGoals ?? []).slice(0, 5).map(
                     (g: any) => ({ id: g.id, description: g.description, type: g.type })

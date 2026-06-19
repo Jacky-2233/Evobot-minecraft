@@ -1,12 +1,4 @@
-/**
- * AI Commander — LLM-driven decision maker
- *
- * Runs every 5-15 seconds. Decides what the bot should do next.
- * Output is validated by Arbiter before execution.
- *
- * LLM role: strategic commander (WHAT to do)
- * Code role: tactical executor (HOW to do it safely)
- */
+import type { SkillLibrary } from './skill-library.js';
 
 export interface CommanderInput {
     position: { x: number; y: number; z: number } | null;
@@ -20,6 +12,7 @@ export interface CommanderInput {
     positionHealth: string;
     currentTask: string | null;
     currentBehavior: string | null;
+    currentGoal: string | null;
     recentEvents: string[];
     recentFailures: string[];
     recentCompletions: string[];
@@ -51,11 +44,12 @@ export class Commander {
     private _lastDecision: CommanderDecision | null = null;
     private _lastDecisionTime = 0;
     private _cooldownMs = 5000;
-    private _running = false;
+    private _skillLib: SkillLibrary | null = null;
 
     get lastDecision(): CommanderDecision | null { return this._lastDecision; }
 
-    /** Decide what to do next */
+    setSkillLibrary(lib: SkillLibrary): void { this._skillLib = lib; }
+
     async decide(input: CommanderInput): Promise<CommanderDecision> {
         const prompt = this.buildPrompt(input);
 
@@ -67,14 +61,17 @@ export class Commander {
                     content:
                         'You are EvoBot Commander. Given the bot state, decide the next action.\n' +
                         'Output ONLY valid JSON with keys: mode, goal, tasks (array), reason, riskLevel.\n' +
-                        `Available task types: move_to (x,y,z,reachDistance), collect (target,count,maxDistance), pickup, eat, retreat (distance).\n` +
+                        (this._skillLib
+                            ? `Available skills:\n${this._skillLib.toPromptBlock()}\n\n`
+                            : '') +
                         `Modes:\n` +
                         `- "continue": keep doing current task\n` +
                         `- "switch_goal": start a new goal\n` +
                         `- "recover": health/food low or position invalid, need recovery\n` +
                         `- "idle": nothing useful to do\n` +
                         `- "generate_spec": enough gap data, generate skill spec\n` +
-                        `Keep it concise. 1-3 tasks max. riskLevel: low/medium/high based on hostile or health risks.`,
+                        `Keep it concise. 1-3 tasks max. riskLevel: low/medium/high based on hostile or health risks.\n` +
+                        `Choose from available skills only. Use correct param names.`,
                 },
                 { role: 'user', content: prompt },
             ], { maxTokens: 300, temperature: 0.7 });
@@ -86,12 +83,7 @@ export class Commander {
         } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : String(err);
             console.warn(`[Commander] LLM error: ${msg}`);
-            return {
-                mode: 'idle',
-                reason: `LLM error: ${msg}`,
-                tasks: [],
-                riskLevel: 'low',
-            };
+            return { mode: 'idle', reason: `LLM error: ${msg}`, tasks: [], riskLevel: 'low' };
         }
     }
 
@@ -112,6 +104,7 @@ export class Commander {
             `Hostile: ${hostileStr}`,
             `Nearby blocks: ${blockStr}`,
             `Current: ${input.currentTask ?? 'idle'} | Behavior: ${input.currentBehavior ?? 'none'}`,
+            `Current goal: ${input.currentGoal ?? 'none'}`,
             `Recent failures: ${failStr}`,
             `Recent completions: ${input.recentCompletions.slice(-2).join('; ') || 'none'}`,
             `Gap findings: ${gapStr}`,

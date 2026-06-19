@@ -435,7 +435,7 @@ export interface EnhancedCheckpoint extends Checkpoint {
 
 // ─── Goal Types ──────────────────────────────────────────
 export type GoalStatus = 'pending' | 'active' | 'paused' | 'completed' | 'failed' | 'cancelled';
-export type GoalPriority = 'survival' | 'user' | 'autonomous';
+export type GoalPriority = 'survival' | 'user' | 'autonomous' | 'growth';
 
 export interface Goal {
   id: string;
@@ -448,7 +448,30 @@ export interface Goal {
   failReason?: string;
   /** Task IDs that belong to this goal */
   taskIds: string[];
+  /** Progress 0-1 */
+  progress?: number;
   metadata: Record<string, unknown>;
+}
+
+// ─── Skill Metadata ──────────────────────────────────────
+export interface SkillParam {
+  name: string;
+  type: 'number' | 'string' | 'boolean' | 'object';
+  description: string;
+  required?: boolean;
+  default?: unknown;
+}
+
+export interface SkillMeta {
+  name: string;
+  description: string;
+  inputParams: SkillParam[];
+  preconditions: string[];
+  successCondition: string;
+  failReasons: string[];
+  tags: string[];
+  complexity: number;
+  dependsOn: string[];
 }
 
 /** Helper: Create a step definition */

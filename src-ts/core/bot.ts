@@ -40,7 +40,8 @@ import { DashboardStateProvider } from '../layers/dashboard-state.js';
 import { DashboardServer } from '../web/dashboard.js';
 import { AgentOrchestrator } from '../layers/orchestrator.js';
 import { Arbiter } from '../layers/arbiter.js';
-import { GoalManager } from '../layers/goal-manager.js';
+import { GoalManager, createDefaultCurriculum } from '../layers/goal-manager.js';
+import { SkillLibrary } from '../layers/skill-library.js';
 import { nanTracer, isFiniteVec3 } from '../utils/nan-guard.js';
 import { initLLM, callLLM } from '../utils/llm.js';
 import type { BotConfig, TaskDefinition } from '../types/index.js';
@@ -131,6 +132,11 @@ export class EvoBotCore {
         this.executor.registerSkill(new RetreatSkill(this.bot));
         this.executor.registerSkill(new EatSkill(this.bot));
         this.executor.registerSkill(new CraftSkill(this.bot));
+
+        // Skill library + GoalManager curriculum
+        const skillLib = new SkillLibrary(this.executor);
+        this.goalManager.setSkillLibrary(skillLib);
+        this.goalManager.setCurriculumRules(createDefaultCurriculum());
 
         // Register user-provided skills
         if (options.skills) {
@@ -232,6 +238,14 @@ export class EvoBotCore {
         this.executor.onComplete = (result) => {
             this.memory.recordTask(result);
             this.sessionStats.recordTask(result.task.type, result.result.ok);
+            // Update goal progress if task carries a goalId
+            if (result.task.goalId) {
+                const detail = result.result.detail;
+                const countMatch = detail.match(/(\d+)\/(\d+)/);
+                if (countMatch) {
+                    this.goalManager.recordTaskProgress(result.task.goalId, parseInt(countMatch[1]), parseInt(countMatch[2]));
+                }
+            }
             const evType = result.result.ok ? 'task_ok' : 'task_fail';
             this.dashboardProvider?.pushEvent(evType, `${result.task.type}: ${result.result.detail}`);
             // Track recent completions
@@ -374,6 +388,15 @@ export class EvoBotCore {
                 if (!this.running) return;
                 this.gapDetector?.tick();
             }, 300000),
+        );
+
+        // Curriculum check — every 30 seconds
+        this.intervals.push(
+            setInterval(() => {
+                if (!this.running) return;
+                const inv = this.bot.inventory?.items()?.map(i => `${(i as any).name} x${i.count}`) ?? [];
+                this.goalManager.curriculumTick(inv);
+            }, 30000),
         );
 
         // Periodic checkpoint save — every 5 seconds

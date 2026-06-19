@@ -171,6 +171,7 @@ summary{cursor:pointer;color:#58a6ff}
     <h2>🎯 Current Goal</h2>
     <div class="row"><span class="dim">Goal</span><span class="val" id="goalDesc">none</span></div>
     <div class="row"><span class="dim">Type</span><span class="val" id="goalType">--</span></div>
+    <div class="row"><span class="dim">Progress</span><span class="val" id="goalProgress">--</span></div>
     <div class="row"><span class="dim">Pending</span><span class="val" id="goalPending">0</span></div>
     <details><summary>Queue</summary><div id="goalQueue" style="font-size:11px;color:#8b949e;margin-top:4px">--</div></details>
   </div>
@@ -274,6 +275,8 @@ function render(s) {
     document.getElementById('goalDesc').textContent = s.goal.activeDescription || 'none';
     document.getElementById('goalType').textContent = s.goal.activeType || '--';
     document.getElementById('goalPending').textContent = s.goal.pendingCount || '0';
+    const pct = s.goal.progress != null ? Math.round(s.goal.progress * 100) + '%' : '--';
+    document.getElementById('goalProgress').textContent = pct;
     const qDiv = document.getElementById('goalQueue');
     qDiv.innerHTML = (s.goal.queue || []).map(g => '<div>' + esc(g.type) + ': ' + esc(g.description) + '</div>').join('') || '--';
   }
