@@ -1,8 +1,9 @@
-# EvoBot v6 — 项目状态
+# EvoBot — 项目状态
 
 > 最后更新：2026-06-19  
-> 双版本并存：`v5`（`src/`、`bot.js`）| `v6`（`src-ts/`）  
-> 当前阶段：Phase 4 (GoalManager)
+> **当前版本**: v7 (`src-ts-v7/`) — AI 驱动，极简架构  
+> **已归档**: v6 (`archive/v6/`) — 分层架构参考  
+> **并存**: v5 (`v5/`) — JavaScript 生产版
 
 ---
 

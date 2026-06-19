@@ -5,13 +5,9 @@
   "main": "bot.js",
   "scripts": {
     "start": "npx tsx src-ts-v7/index.ts",
-    "start:v5": "node v5/bot.js",
-    "start:v6": "npx tsx src-ts/index.ts",
     "start:v7": "npx tsx src-ts-v7/index.ts",
-    "dash": "node v5/dashboard-cli.js",
-    "test": "node --check v5/bot.js",
-    "test:v6": "npx tsx test-v6.ts",
-    "test:gap": "npx tsx test-gap-detector.ts"
+    "start:v5": "node v5/bot.js",
+    "test": "node --check v5/bot.js"
   },
   "dependencies": {
     "express": "^5.2.1",
