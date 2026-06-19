@@ -32,6 +32,14 @@ console.log('================================');
 console.log('  EvoBot v7 — AI Driven');
 console.log('================================');
 
+process.on('uncaughtException', (err) => {
+    console.error('[FATAL] Uncaught exception:', err.message);
+    console.error(err.stack);
+});
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('[FATAL] Unhandled rejection at:', promise, 'reason:', reason);
+});
+
 const core = new EvoBotV7(loadConfig());
 
 if (process.stdin.isTTY) {

@@ -100,7 +100,7 @@ export class EvoBotV7 {
         });
         this.bot.on('chat', (username: string, msg: string) => {
             if (username === this.bot.username) return;
-            this.handleChat(username, msg);
+            this.handleChat(username, msg).catch(e => console.error('[V7] Chat handler error:', (e as Error).message));
         });
     }
 
