@@ -119,7 +119,9 @@ export class EvoBotV7 {
         }
         this._inWater = false;
 
-        if (this.bot.health <= this.config.criticalHealthThreshold) {
+        const health = this.bot.health ?? 20;
+        const food = this.bot.food ?? 20;
+        if (health <= this.config.criticalHealthThreshold) {
             this.runSkill('retreat', { distance: 16 });
             return;
         }
@@ -140,23 +142,27 @@ export class EvoBotV7 {
     }
 
     private async askAI(): Promise<{ type: string; params: any } | null> {
-        const p = this.bot.entity.position;
-        const inv = this.bot.inventory.items().filter(Boolean);
-        const invStr = inv.slice(0, 8).map(i => `${(i as any).name} x${i.count}`).join(', ') || 'empty';
-        const hostile = this.findHostile(12);
+        const p = this.bot.entity?.position;
+        const inv = this.bot.inventory?.items()?.filter(Boolean) ?? [];
+        const invStr = inv.slice(0, 8).map(i => `${(i as any).name ?? '?'} x${i.count}`).join(', ') || 'empty';
+        const hostile = p ? this.findHostile(12) : null;
         const hostileStr = hostile ? `${hostile.name} ${hostile.distance.toFixed(1)}m` : 'none';
-        const nearby = this.bot.findBlock({ matching: (b: any) => !!b, maxDistance: 8 });
+
+        const hp = ((this.bot.health ?? 20).toFixed(0));
+        const fd = ((this.bot.food ?? 20).toFixed(0));
+        const posStr = p ? `(${p.x.toFixed(0)}, ${p.y.toFixed(0)}, ${p.z.toFixed(0)})` : '(?, ?, ?)';
+        const nearby = p ? this.bot.findBlock({ matching: (b: any) => !!b, maxDistance: 8 }) : null;
         const blockStr = nearby ? `${nearby.name}` : 'none';
 
         const prompt = `You are EvoBot v7, a Minecraft bot. Decide the next action.
 
 State:
-- HP: ${this.bot.health.toFixed(0)}/${this.bot.food.toFixed(0)}
-- Pos: (${p.x.toFixed(0)}, ${p.y.toFixed(0)}, ${p.z.toFixed(0)})
+- HP: ${hp}/${fd}
+- Pos: ${posStr}
 - Inv: ${invStr}
 - Hostile: ${hostileStr}
 - Block ahead: ${blockStr}
-- Last event: ${this._lastEvent}
+- Last event: ${this._lastEvent || 'none'}
 
 Available actions (respond with JSON only, no explanation):
 {"do":"move_to","x":NUM,"y":NUM,"z":NUM}         — walk to coordinates
@@ -199,6 +205,7 @@ Player <${username}>: "${message}"`;
     }
 
     private async runSkill(type: string, params: any): Promise<SkillResult> {
+        if (type === 'wait') return { ok: true, detail: 'Waited one tick' };
         const s = this.skills.get(type);
         if (!s) return { ok: false, detail: `Unknown skill: ${type}` };
         return s.run(params);
