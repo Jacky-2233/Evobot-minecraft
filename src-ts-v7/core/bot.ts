@@ -114,6 +114,9 @@ export class EvoBotV7 {
         const moves = new Movements(this.bot, mcData);
         moves.canDig = false;
         moves.allowParkour = false;
+        moves.allowSprinting = false; // less overshoot near edges/water
+        moves.liquidCost = 100; // strongly discourage paths through water
+        moves.infiniteLiquidDropdownDistance = false; // don't drop into water from height
         // Avoid walking into water/lava
         const water = mcData.blocksByName['water']?.id;
         const lava = mcData.blocksByName['lava']?.id;
