@@ -10,3 +10,7 @@ test_err.txt
 CLAUDE_CHAT.md
 deepseek api.txt
 api_key_DO_NOT_DELETE.txt
+config.json
+config.json.backup-*
+.venv-filterrepo/
+replacements.txt

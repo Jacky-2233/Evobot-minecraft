@@ -27,7 +27,7 @@
     "maxTokens": 200
   },
   "web": {
-    "enabled": true,
+    "enabled": false,
     "port": 3000
   },
   "bot": {
@@ -52,10 +52,10 @@
     "moodEnabled": true
   },
   "evolution": {
-    "enabled": true
+    "enabled": false
   },
   "vision": {
-    "enabled": true,
+    "enabled": false,
     "apiKey": "",
     "baseURL": "",
     "model": "kimi-v1",
@@ -63,7 +63,7 @@
     "maxTokens": 200
   },
   "viewer": {
-    "enabled": true,
+    "enabled": false,
     "port": 3001,
     "headless": true,
     "viewDistance": 4,
