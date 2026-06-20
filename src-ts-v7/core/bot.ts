@@ -26,18 +26,69 @@ function getGoalNear(): any {
 }
 
 type AnySkill = MoveToSkill | CollectSkill | EatSkill | RetreatSkill | CraftSkill | CraftChainSkill;
+type TaskItem = { type: string; params: any; retries: number };
+type RuntimeTask = {
+    id: string;
+    type: 'follow_player';
+    status: 'running' | 'paused' | 'interrupted' | 'failed';
+    targetPlayer: string;
+    desiredDistance: number;
+    tolerance: number;
+    maxChaseDistance: number;
+    lastKnownTargetPos?: { x: number; y: number; z: number };
+    interruptReason?: string;
+    lastError?: string;
+    resumeAfterInterrupt: boolean;
+    retries: number;
+    updatedAt: number;
+} | {
+    id: string;
+    type: 'search_target';
+    status: 'running' | 'paused' | 'interrupted' | 'failed';
+    targetName: string;
+    targetKind: 'entity' | 'block';
+    searchRadius: number;
+    maxSearchDistance: number;
+    exploreStepDistance: number;
+    exploredSteps: number;
+    anchorPos: { x: number; y: number; z: number };
+    lastKnownTargetPos?: { x: number; y: number; z: number };
+    interruptReason?: string;
+    lastError?: string;
+    resumeAfterInterrupt: boolean;
+    retries: number;
+    updatedAt: number;
+};
+type GoalAssessment = {
+    userRequest: string;
+    intent: string;
+    confidence: number;
+    supported: boolean;
+    reason?: string;
+    suggestedFallback?: string;
+    updatedAt: number;
+};
 
 export class EvoBotV7 {
     readonly bot: Bot;
     private config: BotConfig;
     private skills = new Map<string, AnySkill>();
     private running = false;
-    private _taskQueue: Array<{ type: string; params: any }> = [];
+    private _taskQueue: TaskItem[] = [];
     private _prevHealth = 20;
     private _reconnectAttempts = 0;
     private _inWater = false;
     private _lastEvent = '';
     private _logDir = 'logs';
+    private _loopTimer: NodeJS.Timeout | null = null;
+    private _emergencyActive = false;
+    private _currentTask: TaskItem | null = null;
+    private _lastPlannedAction: { type: string; params: any } | null = null;
+    private _runtimeTask: RuntimeTask | null = null;
+    private _lastFollowGoalUpdateMs = 0;
+    private _lastFollowTargetSnapshot: { x: number; y: number; z: number } | null = null;
+    private _lastGoalAssessment: GoalAssessment | null = null;
+    private _lastSearchGoalUpdateMs = 0;
 
     // Decision/movement pacing (prevents erratic running)
     private _lastDecisionMs = 0;
@@ -63,7 +114,7 @@ export class EvoBotV7 {
         this.register(new CraftChainSkill(this.bot));
 
         initLLM(config);
-        this.setupEvents();
+        this.bindBotEvents(this.bot);
     }
 
     private register(s: AnySkill): void { this.skills.set(s.name, s); }
@@ -80,26 +131,117 @@ export class EvoBotV7 {
     setModel(name: string): void { setModel(name); }
     listModels(): string { return listModels(); }
     listCraftChains(): string { return listCraftChains(); }
-    submitTask(type: string, params: any): void { this._taskQueue.push({ type, params }); }
+    submitTask(type: string, params: any): void { this._taskQueue.push({ type, params, retries: 0 }); }
+    chat(message: string): void { this.bot.chat(message); }
+    queueTask(type: string, params: any): void { this._taskQueue.push({ type, params, retries: 0 }); }
+    replaceWithTask(type: string, params: any): void { this._taskQueue = [{ type, params, retries: 0 }]; }
+    followPlayer(player?: string, distance = 12, tolerance = 2, maxDistance = 100): void {
+        this.applyFollowTask(player ?? '', distance, tolerance, maxDistance);
+    }
+    searchTarget(target: string, kind: 'entity' | 'block' = 'entity', radius = 24, maxDistance = 100, stepDistance = 12): void {
+        this.applySearchTask(target, kind, radius, maxDistance, stepDistance);
+    }
+    clearRuntimeTask(): void {
+        this._runtimeTask = null;
+        this._lastFollowGoalUpdateMs = 0;
+        this._lastFollowTargetSnapshot = null;
+        this._lastSearchGoalUpdateMs = 0;
+        try { this.bot.pathfinder?.stop(); } catch {}
+    }
+    stopAll(): void {
+        this.clearRuntimeTask();
+        this._taskQueue = [];
+        try { this.bot.pathfinder?.stop(); } catch {}
+        try { this.bot.clearControlStates(); } catch {}
+        this._lastEvent = 'STOP all work';
+    }
+    getScanSummary(query?: string, radius = 24): string {
+        const q = (query ?? '').toLowerCase();
+        const players = this.findNearbyPlayers(radius)
+            .filter(p => !q || p.name.toLowerCase().includes(q))
+            .map(p => `${p.name}@(${p.x},${p.y},${p.z}) ${p.distance.toFixed(1)}m`).join(', ') || 'none';
+        const entities = this.findNearbyEntities(radius, 10)
+            .filter(e => !q || e.name.toLowerCase().includes(q))
+            .map(e => `${e.name}@(${e.x},${e.y},${e.z}) ${e.distance.toFixed(1)}m`).join(', ') || 'none';
+        const blocks = this.findNearbyBlocks(radius, 10)
+            .filter(b => !q || b.name.toLowerCase().includes(q))
+            .map(b => `${b.name}@(${b.x},${b.y},${b.z})`).join(', ') || 'none';
+        return [`Players: ${players}`, `Entities: ${entities}`, `Blocks: ${blocks}`].join('\n');
+    }
+    getPlayersSummary(radius = 48): string {
+        const players = this.findNearbyPlayers(radius);
+        if (players.length === 0) return 'Players: none';
+        return ['Players:'].concat(players.map(p => `- ${p.name} @ (${p.x}, ${p.y}, ${p.z}) ${p.distance.toFixed(1)}m`)).join('\n');
+    }
+    getEntitiesSummary(radius = 24, limit = 12): string {
+        const entities = this.findNearbyEntities(radius, limit);
+        if (entities.length === 0) return 'Entities: none';
+        return ['Entities:'].concat(entities.map(e => `- ${e.name} @ (${e.x}, ${e.y}, ${e.z}) ${e.distance.toFixed(1)}m`)).join('\n');
+    }
+    getBlocksSummary(radius = 24, limit = 12): string {
+        const blocks = this.findNearbyBlocks(radius, limit);
+        if (blocks.length === 0) return 'Blocks: none';
+        return ['Blocks:'].concat(blocks.map(b => `- ${b.name} @ (${b.x}, ${b.y}, ${b.z})`)).join('\n');
+    }
+    getTasksSummary(): string {
+        const runtimeTask = this._runtimeTask
+            ? this._runtimeTask.type === 'follow_player'
+                ? `runtime: follow_player target=${this._runtimeTask.targetPlayer} dist=${this._runtimeTask.desiredDistance} tol=${this._runtimeTask.tolerance} status=${this._runtimeTask.status}`
+                : `runtime: search_target target=${this._runtimeTask.targetName} kind=${this._runtimeTask.targetKind} explored=${this._runtimeTask.exploredSteps} status=${this._runtimeTask.status}`
+            : 'runtime: none';
+        const queued = this._taskQueue.length > 0
+            ? this._taskQueue.map((t, i) => `${i + 1}. ${t.type} ${JSON.stringify(t.params)}${t.retries > 0 ? ` retries=${t.retries}` : ''}`).join('\n')
+            : 'queue: empty';
+        const current = this._currentTask ? `current: ${this._currentTask.type} ${JSON.stringify(this._currentTask.params)}` : 'current: none';
+        return [runtimeTask, current, queued].join('\n');
+    }
+    getStatusSummary(): string {
+        const pos = this.bot.entity?.position;
+        const posStr = pos ? `(${pos.x.toFixed(0)}, ${pos.y.toFixed(0)}, ${pos.z.toFixed(0)})` : '(?, ?, ?)';
+        const current = this._currentTask ? `${this._currentTask.type} ${JSON.stringify(this._currentTask.params)}` : 'none';
+        const queued = this._taskQueue.length > 0
+            ? this._taskQueue.map(t => `${t.type}${t.retries > 0 ? `#${t.retries}` : ''}`).join(', ')
+            : 'empty';
+        const lastPlan = this._lastPlannedAction ? `${this._lastPlannedAction.type} ${JSON.stringify(this._lastPlannedAction.params)}` : 'none';
+        const lastMove = this._lastMoveTarget ? `(${this._lastMoveTarget.x}, ${this._lastMoveTarget.y}, ${this._lastMoveTarget.z})` : 'none';
+        const runtimeTask = this._runtimeTask
+            ? this._runtimeTask.type === 'follow_player'
+                ? `${this._runtimeTask.type} target=${this._runtimeTask.targetPlayer} dist=${this._runtimeTask.desiredDistance} tol=${this._runtimeTask.tolerance} status=${this._runtimeTask.status}${this._runtimeTask.interruptReason ? ` interrupt=${this._runtimeTask.interruptReason}` : ''}`
+                : `${this._runtimeTask.type} target=${this._runtimeTask.targetName} kind=${this._runtimeTask.targetKind} radius=${this._runtimeTask.searchRadius} max=${this._runtimeTask.maxSearchDistance} step=${this._runtimeTask.exploreStepDistance} explored=${this._runtimeTask.exploredSteps} status=${this._runtimeTask.status}${this._runtimeTask.interruptReason ? ` interrupt=${this._runtimeTask.interruptReason}` : ''}`
+            : 'none';
+        const goalAssessment = this._lastGoalAssessment
+            ? `${this._lastGoalAssessment.intent} supported=${this._lastGoalAssessment.supported} conf=${this._lastGoalAssessment.confidence}${this._lastGoalAssessment.reason ? ` reason=${this._lastGoalAssessment.reason}` : ''}`
+            : 'none';
+        return [
+            `Pos: ${posStr}`,
+            `Runtime task: ${runtimeTask}`,
+            `Last goal assessment: ${goalAssessment}`,
+            `Current task: ${current}`,
+            `Queued: ${queued}`,
+            `Last AI plan: ${lastPlan}`,
+            `Last move target: ${lastMove}`,
+            `Last event: ${this._lastEvent || 'none'}`,
+        ].join('\n');
+    }
 
-    private setupEvents(): void {
-        this.bot.once('spawn', () => this.onSpawn());
-        this.bot.on('end', () => this.onEnd());
-        this.bot.on('error', (e: Error) => console.error(`[V7] ${e.message}`));
-        this.bot.on('health', () => {
-            const hp = this.bot.health;
+    private bindBotEvents(bot: Bot): void {
+        bot.once('spawn', () => this.onSpawn());
+        bot.on('end', () => this.onEnd());
+        bot.on('error', (e: Error) => console.error(`[V7] ${e.message}`));
+        bot.on('health', () => {
+            const hp = bot.health;
             if (hp < this._prevHealth && hp <= this.config.lowHealthThreshold) {
-                this.bot.pathfinder?.stop();
-                attackNearestHostile(this.bot);
+                bot.pathfinder?.stop();
+                attackNearestHostile(bot);
             }
             this._prevHealth = hp;
         });
-        this.bot.on('death', () => {
+        bot.on('death', () => {
             console.warn('[V7] Died');
             this.execClear();
         });
-        this.bot.on('chat', (username: string, msg: string) => {
-            if (username === this.bot.username) return;
+        bot.on('chat', (username: string, msg: string) => {
+            if (username === bot.username) return;
             this.handleChat(username, msg).catch(e => console.error('[V7] Chat handler error:', (e as Error).message));
         });
     }
@@ -141,10 +283,11 @@ export class EvoBotV7 {
     }
 
     private startLoop(): void {
+        if (this._loopTimer) clearTimeout(this._loopTimer);
         const tick = async () => {
             if (!this.running) return;
             try { await this.tick(); } catch (e) { console.error('[V7] Tick error:', (e as Error).message); }
-            setTimeout(tick, this.config.updateIntervalMs);
+            this._loopTimer = setTimeout(tick, this.config.updateIntervalMs);
         };
         tick();
     }
@@ -162,8 +305,15 @@ export class EvoBotV7 {
                 this._inWater = true;
                 console.warn('[V7] In water — swimming up');
                 this.bot.pathfinder?.stop();
+                this.interruptRuntimeTask('water_escape');
             }
             // Swim up until head is above water
+            this.bot.setControlState('forward', false);
+            this.bot.setControlState('back', false);
+            this.bot.setControlState('left', false);
+            this.bot.setControlState('right', false);
+            this.bot.setControlState('sprint', false);
+            this.bot.setControlState('sneak', false);
             this.bot.setControlState('jump', true);
             try { this.bot.look(this.bot.entity.yaw, -Math.PI / 2, true); } catch {}
             return;
@@ -172,25 +322,59 @@ export class EvoBotV7 {
             this._inWater = false;
             this.bot.setControlState('jump', false);
             console.log('[V7] Out of water');
+            this.resumeRuntimeTaskIfPossible('water_escape');
         }
 
         const health = this.bot.health ?? 20;
         if (health <= this.config.criticalHealthThreshold) {
-            this.runSkill('retreat', { distance: 16 });
+            if (!this._emergencyActive) {
+                this._emergencyActive = true;
+                try {
+                    this.interruptRuntimeTask('critical_health');
+                    const result = await this.runSkill('retreat', { distance: 16 });
+                    this._lastEvent = `${result.ok ? 'OK' : 'FAIL'} retreat: ${result.detail}`;
+                } finally {
+                    this.resumeRuntimeTaskIfPossible('critical_health');
+                    this._emergencyActive = false;
+                }
+            }
             return;
         }
 
         // ── Execute queued tasks ──
         if (this._taskQueue.length > 0) {
             const task = this._taskQueue[0];
+            this._currentTask = task;
             const result = await this.runSkill(task.type, task.params);
             console.log(`[V7] ${result.ok ? 'OK' : 'FAIL'} ${task.type}: ${result.detail}`);
-            this._taskQueue.shift();
             this._lastEvent = `${result.ok ? 'OK' : 'FAIL'} ${task.type}: ${result.detail}`;
-            if (task.type === 'move_to') {
+            if (result.ok) {
+                this._taskQueue.shift();
+            } else if (this.isRetryableFailure(result) && task.retries < 2) {
+                task.retries++;
+                console.warn(`[V7] Retrying ${task.type} (${task.retries}/2)`);
+            } else {
+                this._taskQueue.shift();
+            }
+            if (result.ok && task.type === 'move_to') {
                 this._lastMoveTarget = { x: task.params.x, y: task.params.y, z: task.params.z };
                 this._lastArrivalMs = Date.now();
             }
+            this._currentTask = null;
+            return;
+        }
+
+        if (await this.tickRuntimeTask()) return;
+
+        // Deterministic early-game fallback: if wood is visible and inventory is short on wood/planks,
+        // collect it before asking the LLM to freeform explore.
+        const nearbyLog = this.bot.findBlock({ matching: (b: any) => b?.name?.includes('log') ?? false, maxDistance: 10 });
+        const woodCount = this.countInventoryMatches(['log', 'planks']);
+        if (nearbyLog && woodCount < 6) {
+            const action = { type: 'collect', params: { target: 'log', count: 1 } };
+            this._lastPlannedAction = action;
+            console.log('[plan] collect nearby log');
+            this._taskQueue.push({ ...action, retries: 0 });
             return;
         }
 
@@ -204,7 +388,17 @@ export class EvoBotV7 {
         // ── AI decides next action ──
         const action = await this.askAI();
         this._lastDecisionMs = now;
-        if (action) this._taskQueue.push(action);
+        if (action) {
+            this._lastPlannedAction = { type: action.type, params: action.params };
+            if (action.type !== 'wait') console.log(`[plan] ${action.type} ${JSON.stringify(action.params)}`);
+            if (action.type === 'follow_player') {
+                this.applyFollowTask(action.params.player, action.params.desiredDistance ?? 12, action.params.tolerance ?? 2, action.params.maxChaseDistance ?? 100);
+            } else if (action.type === 'search_target') {
+                this.applySearchTask(action.params.target, action.params.kind, action.params.radius, action.params.maxDistance, action.params.stepDistance);
+            } else {
+                this._taskQueue.push({ ...action, retries: 0 });
+            }
+        }
     }
 
     private buildStatePrompt(): string {
@@ -216,14 +410,26 @@ export class EvoBotV7 {
         const hp = ((this.bot.health ?? 20).toFixed(0));
         const fd = ((this.bot.food ?? 20).toFixed(0));
         const posStr = p ? `(${p.x.toFixed(0)}, ${p.y.toFixed(0)}, ${p.z.toFixed(0)})` : '(?, ?, ?)';
-        const nearby = p ? this.bot.findBlock({ matching: (b: any) => !!b && b.name !== 'air', maxDistance: 8 }) : null;
-        const blockStr = nearby ? `${nearby.name}` : 'none';
+        const nearbyBlocks = p ? this.findNearbyBlocks(10, 6) : [];
+        const blockStr = nearbyBlocks.length > 0
+            ? nearbyBlocks.map(b => `${b.name}@(${b.x}, ${b.y}, ${b.z})`).join(', ')
+            : 'none';
+        const nearbyPlayers = p ? this.findNearbyPlayers(24) : [];
+        const playerStr = nearbyPlayers.length > 0
+            ? nearbyPlayers.map(e => `${e.name}@(${e.x}, ${e.y}, ${e.z}) ${e.distance.toFixed(1)}m`).join(', ')
+            : 'none';
+        const nearbyEntities = p ? this.findNearbyEntities(16, 8) : [];
+        const entityStr = nearbyEntities.length > 0
+            ? nearbyEntities.map(e => `${e.name}@(${e.x}, ${e.y}, ${e.z}) ${e.distance.toFixed(1)}m`).join(', ')
+            : 'none';
         const lastMove = this._lastMoveTarget ? `(${this._lastMoveTarget.x}, ${this._lastMoveTarget.y}, ${this._lastMoveTarget.z})` : 'none';
         return `HP: ${hp}/${fd}
 Pos: ${posStr}
 Inv: ${invStr}
+Players nearby: ${playerStr}
+Entities nearby: ${entityStr}
 Hostile: ${hostileStr}
-Block ahead: ${blockStr}
+Nearby blocks: ${blockStr}
 Last move target: ${lastMove}
 Last event: ${this._lastEvent || 'none'}`;
     }
@@ -241,17 +447,36 @@ Last event: ${this._lastEvent || 'none'}`;
 State:
 ${state}
 
-Available actions (JSON only):
-{"do":"move_to","x":NUM,"y":NUM,"z":NUM}  — walk to coordinates. Pick ONE destination 8-16 blocks away and commit to it.
-{"do":"collect","target":"log","count":1}  — mine nearest blocks (count optional)
-{"do":"craft_chain","item":"wooden_pickaxe"} — gather + craft full chain (wooden_pickaxe, stone_pickaxe, crafting_table, sticks, furnace)
-{"do":"craft","item":"stone_pickaxe"}       — craft single item if materials already in inventory
-{"do":"eat"}                               — eat food from inventory
-{"do":"retreat","distance":16}             — run from danger
-{"do":"wait"}                              — skip tick (only if busy)
+Supported intents:
+- move_to
+- follow_player
+- search_target
+- collect
+- craft_chain
+- craft
+- eat
+- retreat
+- wait
+
+Respond with JSON only:
+{"intent":"move_to","supported":true,"x":NUM,"y":NUM,"z":NUM}
+{"intent":"follow_player","supported":true,"player":"Jacky_MC_","distance":12,"tolerance":2}
+{"intent":"search_target","supported":true,"target":"sheep","kind":"entity","radius":24,"maxDistance":100,"stepDistance":12}
+{"intent":"collect","supported":true,"target":"log","count":1}
+{"intent":"craft_chain","supported":true,"item":"wooden_pickaxe"}
+{"intent":"craft","supported":true,"item":"stone_pickaxe"}
+{"intent":"eat","supported":true}
+{"intent":"retreat","supported":true,"distance":16}
+{"intent":"wait","supported":true}
+{"intent":"refuse","supported":false,"reason":"missing_skill_or_info","fallback":"wait or collect log"}
 
 IMPORTANT:
-- When idle, use move_to to explore. Pick a destination and stick to it; do NOT ping-pong to nearby points.
+- If players nearby are visible and they talk to you, prefer moving toward their coordinates instead of random exploration.
+- For player-following behavior, use follow_player instead of repeating move_to every cycle.
+- Use search_target for unfamiliar but nearby search goals like sheep, coal, logs, or crafting tables.
+- If nearby useful blocks include logs and inventory wood is low, prefer collect log before wandering.
+- When idle, use move_to to explore based on nearby players, entities, and useful blocks. Do NOT pick arbitrary points when useful coordinates are available.
+- Pick a destination and stick to it; do NOT ping-pong to nearby points.
 - Avoid reversing direction from "Last move target".
 - If hostile is nearby, use retreat.
 - Coords must be integers.`;
@@ -267,7 +492,28 @@ IMPORTANT:
         }
 
         if (!reply) return { type: 'wait', params: {} };
-        return this.parseAction(reply);
+
+        const defaultPlayer = this.findNearbyPlayers(48)[0]?.name ?? '';
+        const intent = this.parseGenericIntent(reply, '(autonomous)', defaultPlayer);
+        if (!intent) return { type: 'wait', params: {} };
+
+        this._lastGoalAssessment = {
+            userRequest: '(autonomous)',
+            intent: intent.intent,
+            confidence: intent.confidence ?? 0.8,
+            supported: intent.supported,
+            reason: intent.reason,
+            suggestedFallback: intent.fallback,
+            updatedAt: Date.now(),
+        };
+
+        if (!intent.supported) {
+            console.log(`[plan] refused autonomous intent: ${intent.reason ?? 'unsupported'}`);
+            this._lastEvent = `REFUSED autonomous: ${intent.reason ?? 'unsupported'}`;
+            return { type: 'wait', params: {} };
+        }
+
+        return this.intentToAction(intent, defaultPlayer);
     }
 
     /** Chat handler: LLM can both reply in text AND submit an action */
@@ -287,13 +533,28 @@ ${state}
 
 Player <${username}>: "${message}"
 
-Respond with JSON (no other text):
-{"reply":"your chat reply","do":"wait"} — just chat, no action
-{"reply":"ok coming!","do":"move_to","x":0,"y":64,"z":0} — chat AND move
-{"reply":"here you go","do":"collect","target":"log"} — chat AND collect
-{"reply":"on it","do":"craft_chain","item":"wooden_pickaxe"} — chat AND auto gather+craft
-{"reply":"on it","do":"craft","item":"wooden_pickaxe"} — chat AND craft from inventory
-{"reply":"running!","do":"retreat","distance":16} — chat AND retreat`;
+Supported intents:
+- follow_player
+- search_target
+- move_to
+- collect
+- craft
+- craft_chain
+- retreat
+- stop
+- chat_only
+
+If the request is outside your current abilities, refuse clearly and say why.
+
+Respond with JSON only:
+{"reply":"your chat reply","intent":"chat_only","supported":true}
+{"reply":"on my way","intent":"follow_player","supported":true,"player":"Jacky_MC_","distance":12,"tolerance":2}
+{"reply":"I'll search for it nearby.","intent":"search_target","supported":true,"target":"sheep","kind":"entity","radius":24,"maxDistance":100,"stepDistance":12}
+{"reply":"ok coming!","intent":"move_to","supported":true,"x":0,"y":64,"z":0}
+{"reply":"getting wood","intent":"collect","supported":true,"target":"log","count":1}
+{"reply":"making a pickaxe","intent":"craft_chain","supported":true,"item":"wooden_pickaxe"}
+{"reply":"stopping","intent":"stop","supported":true}
+{"reply":"I can't build a house yet; I can gather wood or craft a table first.","intent":"refuse","supported":false,"reason":"missing_build_skill","fallback":"collect log / craft crafting_table"}`;
 
         const reply = await callLLM([
             { role: 'system', content: 'You are a Minecraft bot. Reply in JSON with "reply" (1 sentence) and optional action.' },
@@ -306,10 +567,18 @@ Respond with JSON (no other text):
             return;
         }
 
-        // Try to parse JSON; if fails, treat entire reply as chat text
-        const action = this.parseAction(reply);
-        if (action) {
-            const chatMsg = (action as any)._reply || '';
+        const chatIntent = this.parseGenericIntent(reply, message, username);
+        if (chatIntent) {
+            this._lastGoalAssessment = {
+                userRequest: message,
+                intent: chatIntent.intent,
+                confidence: chatIntent.confidence ?? 0.8,
+                supported: chatIntent.supported,
+                reason: chatIntent.reason,
+                suggestedFallback: chatIntent.fallback,
+                updatedAt: Date.now(),
+            };
+            const chatMsg = chatIntent.reply || '';
             if (chatMsg && chatMsg !== 'wait') {
                 this.bot.chat(chatMsg);
                 console.log(`[chat] <EvoBot> ${chatMsg}`);
@@ -317,9 +586,28 @@ Respond with JSON (no other text):
             } else {
                 console.log('[chat] no reply text in JSON');
             }
-            if (action.type !== 'wait') {
-                this._taskQueue = [action]; // replace queue (player command priority)
-                console.log(`[chat] enqueued: ${action.type} ${JSON.stringify(action.params)}`);
+            if (!chatIntent.supported) {
+                console.log(`[chat] refused: ${chatIntent.reason ?? 'unsupported'}`);
+                return;
+            }
+            const action = this.intentToAction(chatIntent, username);
+            if (action && action.type !== 'wait') {
+                if (action.type === 'follow_player') {
+                    this.applyFollowTask(action.params.player || username, action.params.desiredDistance ?? 12, action.params.tolerance ?? 2, action.params.maxChaseDistance ?? 100);
+                    this._taskQueue = [];
+                    console.log(`[chat] set runtime task: follow_player ${JSON.stringify(action.params)}`);
+                } else if (action.type === 'search_target') {
+                    this.applySearchTask(action.params.target, action.params.kind, action.params.radius, action.params.maxDistance, action.params.stepDistance);
+                    this._taskQueue = [];
+                    console.log(`[chat] set runtime task: search_target ${JSON.stringify(action.params)}`);
+                } else if (action.type === 'stop') {
+                    this.clearRuntimeTask();
+                    this._taskQueue = [];
+                    console.log('[chat] stopped current work');
+                } else {
+                    this._taskQueue = [{ ...action, retries: 0 }]; // replace queue (player command priority)
+                    console.log(`[chat] enqueued: ${action.type} ${JSON.stringify(action.params)}`);
+                }
             }
         } else {
             // Failed to parse JSON — treat as plain text reply
@@ -339,19 +627,367 @@ Respond with JSON (no other text):
             const j = JSON.parse(m[0]);
             const r: any = { type: 'wait', params: {}, _reply: j.reply };
             if (j.do === 'move_to') { r.type = 'move_to'; r.params = { x: j.x, y: j.y, z: j.z, reachDistance: 2 }; }
+            else if (j.do === 'follow_player') { r.type = 'follow_player'; r.params = { player: j.player, desiredDistance: j.distance ?? 12, tolerance: j.tolerance ?? 2, maxChaseDistance: j.maxDistance ?? 100 }; }
             else if (j.do === 'collect') { r.type = 'collect'; r.params = { target: j.target, count: j.count ?? 1 }; }
             else if (j.do === 'craft_chain') { r.type = 'craft_chain'; r.params = { item: j.item }; }
             else if (j.do === 'craft') { r.type = 'craft'; r.params = { item: j.item, count: 1 }; }
             else if (j.do === 'retreat') { r.type = 'retreat'; r.params = { distance: j.distance ?? 16 }; }
+            else if (j.do === 'stop') { r.type = 'stop'; r.params = {}; }
             return r;
         } catch { return null; }
     }
 
+    private parseGenericIntent(raw: string, message: string, defaultPlayer: string): any | null {
+        let clean = raw.replace(/```[\w]*\n?/g, '').replace(/```/g, '').trim();
+        const m = clean.match(/\{[\s\S]*\}/);
+        if (!m) return null;
+        try {
+            const j = JSON.parse(m[0]);
+            return {
+                intent: j.intent ?? 'chat_only',
+                supported: j.supported !== false,
+                reason: j.reason,
+                fallback: j.fallback,
+                reply: j.reply ?? '',
+                confidence: typeof j.confidence === 'number' ? j.confidence : 0.8,
+                player: j.player ?? defaultPlayer,
+                distance: j.distance,
+                tolerance: j.tolerance,
+                maxDistance: j.maxDistance,
+                kind: j.kind,
+                radius: j.radius,
+                stepDistance: j.stepDistance,
+                x: j.x,
+                y: j.y,
+                z: j.z,
+                target: j.target,
+                count: j.count,
+                item: j.item,
+                originalMessage: message,
+            };
+        } catch {
+            return null;
+        }
+    }
+
+    private intentToAction(intent: any, username: string): { type: string; params: any } | null {
+        switch (intent.intent) {
+            case 'follow_player':
+                return { type: 'follow_player', params: { player: intent.player || username, desiredDistance: intent.distance ?? 12, tolerance: intent.tolerance ?? 2, maxChaseDistance: intent.maxDistance ?? 100 } };
+            case 'search_target':
+                return { type: 'search_target', params: { target: intent.target, kind: intent.kind === 'block' ? 'block' : 'entity', radius: intent.radius ?? 24, maxDistance: intent.maxDistance ?? 100, stepDistance: intent.stepDistance ?? 12 } };
+            case 'move_to':
+                return { type: 'move_to', params: { x: intent.x, y: intent.y, z: intent.z, reachDistance: 2 } };
+            case 'collect':
+                return { type: 'collect', params: { target: intent.target, count: intent.count ?? 1 } };
+            case 'craft_chain':
+                return { type: 'craft_chain', params: { item: intent.item } };
+            case 'craft':
+                return { type: 'craft', params: { item: intent.item, count: 1 } };
+            case 'eat':
+                return { type: 'eat', params: {} };
+            case 'retreat':
+                return { type: 'retreat', params: { distance: intent.distance ?? 16 } };
+            case 'wait':
+                return { type: 'wait', params: {} };
+            case 'stop':
+                return { type: 'stop', params: {} };
+            default:
+                return null;
+        }
+    }
+
     private async runSkill(type: string, params: any): Promise<SkillResult> {
         if (type === 'wait') return { ok: true, detail: 'Waited one tick' };
+        if (type === 'stop') {
+            this.clearRuntimeTask();
+            this._taskQueue = [];
+            return { ok: true, detail: 'Stopped current work' };
+        }
         const s = this.skills.get(type);
         if (!s) return { ok: false, detail: `Unknown skill: ${type}` };
         return s.run(params);
+    }
+
+    private async tickRuntimeTask(): Promise<boolean> {
+        const task = this._runtimeTask;
+        if (!task) return false;
+        if (task.status === 'paused' || task.status === 'failed') return true;
+        if (task.status === 'interrupted') return true;
+        if (task.type === 'follow_player') {
+            return this.tickFollowPlayerTask(task);
+        }
+        if (task.type === 'search_target') {
+            return this.tickSearchTargetTask(task);
+        }
+        return false;
+    }
+
+    private async tickFollowPlayerTask(task: Extract<RuntimeTask, { type: 'follow_player' }>): Promise<boolean> {
+        const target = this.findPlayerEntity(task.targetPlayer);
+        if (!target) {
+            task.status = 'interrupted';
+            task.interruptReason = 'target_lost';
+            task.lastError = `Player not visible: ${task.targetPlayer}`;
+            this._lastEvent = `INTERRUPTED follow_player: ${task.lastError}`;
+            try { this.bot.pathfinder?.stop(); } catch {}
+            return true;
+        }
+
+        const distance = this.bot.entity.position.distanceTo(target.position);
+        task.lastKnownTargetPos = { x: target.position.x, y: target.position.y, z: target.position.z };
+        task.updatedAt = Date.now();
+
+        if (distance > task.maxChaseDistance) {
+            task.status = 'interrupted';
+            task.interruptReason = 'target_too_far';
+            task.lastError = `Target beyond max chase distance: ${distance.toFixed(1)}m`;
+            this._lastEvent = `INTERRUPTED follow_player: ${task.lastError}`;
+            try { this.bot.pathfinder?.stop(); } catch {}
+            return true;
+        }
+
+        const error = distance - task.desiredDistance;
+        const withinBand = Math.abs(error) <= task.tolerance;
+        if (withinBand) {
+            try { this.bot.pathfinder?.stop(); } catch {}
+            try { await this.bot.lookAt(target.position.offset(0, 1, 0), true); } catch {}
+            this._lastEvent = `FOLLOW holding ${target.username ?? target.name} err=${error.toFixed(1)}m`;
+            return true;
+        }
+
+        if (error < -task.tolerance) {
+            try { this.bot.pathfinder?.stop(); } catch {}
+            try { await this.bot.lookAt(target.position.offset(0, 1, 0), true); } catch {}
+            this._lastEvent = `FOLLOW too close to ${target.username ?? target.name} err=${error.toFixed(1)}m`;
+            return true;
+        }
+
+        if (!this.isLikelyReachable(target.position, task.maxChaseDistance)) {
+            task.status = 'interrupted';
+            task.interruptReason = 'unreachable';
+            task.lastError = 'Target seems unreachable from current terrain';
+            this._lastEvent = `INTERRUPTED follow_player: ${task.lastError}`;
+            try { this.bot.pathfinder?.stop(); } catch {}
+            return true;
+        }
+
+        const shouldRefreshGoal = !this._lastFollowTargetSnapshot
+            || Date.now() - this._lastFollowGoalUpdateMs > 1000
+            || Math.sqrt(
+                Math.pow(target.position.x - this._lastFollowTargetSnapshot.x, 2)
+                + Math.pow(target.position.y - this._lastFollowTargetSnapshot.y, 2)
+                + Math.pow(target.position.z - this._lastFollowTargetSnapshot.z, 2)
+            ) > Math.max(2, task.tolerance);
+
+        if (shouldRefreshGoal) {
+            const GN = getGoalNear();
+            if (!GN) return true;
+            this.bot.pathfinder.setGoal(new GN(target.position.x, target.position.y, target.position.z, task.desiredDistance), true);
+            this._lastFollowGoalUpdateMs = Date.now();
+            this._lastFollowTargetSnapshot = { x: target.position.x, y: target.position.y, z: target.position.z };
+            this._lastMoveTarget = { x: Math.round(target.position.x), y: Math.round(target.position.y), z: Math.round(target.position.z) };
+            console.log(`[plan] follow_player ${task.targetPlayer} dist=${task.desiredDistance} err=${error.toFixed(1)}m`);
+        }
+
+        this._lastEvent = `FOLLOW chasing ${task.targetPlayer} err=${error.toFixed(1)}m`;
+        return true;
+    }
+
+    private async tickSearchTargetTask(task: Extract<RuntimeTask, { type: 'search_target' }>): Promise<boolean> {
+        const found = task.targetKind === 'entity'
+            ? this.findMatchingEntity(task.targetName, task.searchRadius)
+            : this.findMatchingBlock(task.targetName, task.searchRadius);
+
+        if (found) {
+            task.lastKnownTargetPos = { x: found.x, y: found.y, z: found.z };
+            task.updatedAt = Date.now();
+            this._lastEvent = `SEARCH found ${task.targetName} @ (${found.x}, ${found.y}, ${found.z})`;
+            if (this.isLikelyReachable(found, task.maxSearchDistance)) {
+                const GN = getGoalNear();
+                if (GN && (Date.now() - this._lastSearchGoalUpdateMs > 1000 || !this._lastMoveTarget || this.distanceSq(this._lastMoveTarget, found) > 4)) {
+                    this.bot.pathfinder.setGoal(new GN(found.x, found.y, found.z, task.targetKind === 'entity' ? 3 : 2), true);
+                    this._lastSearchGoalUpdateMs = Date.now();
+                    this._lastMoveTarget = { x: Math.round(found.x), y: Math.round(found.y), z: Math.round(found.z) };
+                    console.log(`[plan] search_target goto ${task.targetName} @ (${Math.round(found.x)}, ${Math.round(found.y)}, ${Math.round(found.z)})`);
+                }
+                return true;
+            }
+        }
+
+        const nextExplore = this.pickSearchExplorePoint(task);
+        if (!nextExplore) {
+            task.status = 'failed';
+            task.lastError = `Could not find or reach ${task.targetName} within ${task.maxSearchDistance} blocks`;
+            this._lastEvent = `FAILED search_target: ${task.lastError}`;
+            this._lastGoalAssessment = {
+                userRequest: task.targetName,
+                intent: 'search_target',
+                confidence: 0.9,
+                supported: false,
+                reason: 'search_exhausted',
+                suggestedFallback: `scan nearby again or choose a closer target than ${task.targetName}`,
+                updatedAt: Date.now(),
+            };
+            try { this.bot.pathfinder?.stop(); } catch {}
+            return true;
+        }
+
+        const GN = getGoalNear();
+        if (!GN) return true;
+        if (Date.now() - this._lastSearchGoalUpdateMs > 1500 || !this._lastMoveTarget || this.distanceSq(this._lastMoveTarget, nextExplore) > 9) {
+            this.bot.pathfinder.setGoal(new GN(nextExplore.x, nextExplore.y, nextExplore.z, 2), true);
+            this._lastSearchGoalUpdateMs = Date.now();
+            this._lastMoveTarget = { x: nextExplore.x, y: nextExplore.y, z: nextExplore.z };
+            task.exploredSteps++;
+            console.log(`[plan] search_target explore ${task.targetName} -> (${nextExplore.x}, ${nextExplore.y}, ${nextExplore.z})`);
+        }
+        task.updatedAt = Date.now();
+        this._lastEvent = `SEARCH exploring for ${task.targetName} step=${task.exploredSteps}`;
+        return true;
+    }
+
+    private isRetryableFailure(result: SkillResult): boolean {
+        return result.failureType === 'cancelled' || result.failureType === 'path_stuck' || result.failureType === 'timeout';
+    }
+
+    private applyFollowTask(player: string, desiredDistance: number, tolerance: number, maxChaseDistance: number): void {
+        const targetPlayer = player || this.findNearbyPlayers(48)[0]?.name || '';
+        if (!targetPlayer) {
+            console.warn('[V7] Cannot start follow_player: no target player resolved');
+            return;
+        }
+        this._runtimeTask = {
+            id: `follow_${Date.now()}`,
+            type: 'follow_player',
+            status: 'running',
+            targetPlayer,
+            desiredDistance: Math.max(1, Math.min(desiredDistance, 100)),
+            tolerance: Math.max(0.5, Math.min(tolerance, 10)),
+            maxChaseDistance: Math.max(5, Math.min(maxChaseDistance, 100)),
+            resumeAfterInterrupt: true,
+            retries: 0,
+            updatedAt: Date.now(),
+        };
+        this._lastFollowGoalUpdateMs = 0;
+        this._lastFollowTargetSnapshot = null;
+        this._lastEvent = `TASK follow_player -> ${targetPlayer}`;
+    }
+
+    private applySearchTask(targetName: string, targetKind: 'entity' | 'block', searchRadius: number, maxSearchDistance: number, exploreStepDistance: number): void {
+        const pos = this.bot.entity?.position;
+        if (!pos) return;
+        this._runtimeTask = {
+            id: `search_${Date.now()}`,
+            type: 'search_target',
+            status: 'running',
+            targetName,
+            targetKind,
+            searchRadius: Math.max(8, Math.min(searchRadius, 64)),
+            maxSearchDistance: Math.max(8, Math.min(maxSearchDistance, 100)),
+            exploreStepDistance: Math.max(4, Math.min(exploreStepDistance, 24)),
+            exploredSteps: 0,
+            anchorPos: { x: pos.x, y: pos.y, z: pos.z },
+            resumeAfterInterrupt: true,
+            retries: 0,
+            updatedAt: Date.now(),
+        };
+        this._lastSearchGoalUpdateMs = 0;
+        this._lastEvent = `TASK search_target -> ${targetName}`;
+    }
+
+    private interruptRuntimeTask(reason: string): void {
+        if (!this._runtimeTask || this._runtimeTask.status !== 'running') return;
+        if (!this._runtimeTask.resumeAfterInterrupt) return;
+        this._runtimeTask.status = 'interrupted';
+        this._runtimeTask.interruptReason = reason;
+        this._runtimeTask.updatedAt = Date.now();
+    }
+
+    private resumeRuntimeTaskIfPossible(reason: string): void {
+        if (!this._runtimeTask || this._runtimeTask.status !== 'interrupted') return;
+        if (this._runtimeTask.interruptReason !== reason) return;
+        this._runtimeTask.status = 'running';
+        this._runtimeTask.interruptReason = undefined;
+        this._runtimeTask.updatedAt = Date.now();
+        this._lastFollowGoalUpdateMs = 0;
+    }
+
+    private findPlayerEntity(name: string): any {
+        const wanted = (name ?? '').trim().toLowerCase();
+        if (!wanted) return null;
+        for (const [, e] of Object.entries(this.bot.entities)) {
+            if (!e || (e as any).type !== 'player') continue;
+            const username = (((e as any).username ?? (e as any).name ?? '') as string).trim().toLowerCase();
+            if (username === wanted) return e;
+        }
+        return null;
+    }
+
+    private findMatchingEntity(name: string, radius: number): { x: number; y: number; z: number; name: string } | null {
+        const pos = this.bot.entity?.position;
+        if (!pos) return null;
+        const wanted = name.toLowerCase();
+        let best: { x: number; y: number; z: number; name: string } | null = null;
+        let bestDist = Infinity;
+        for (const [, e] of Object.entries(this.bot.entities)) {
+            if (!e || (e as any).type === 'player') continue;
+            const ename = (((e as any).name ?? (e as any).displayName ?? '') as string).toLowerCase();
+            if (!ename.includes(wanted)) continue;
+            const d = pos.distanceTo(e.position);
+            if (d > radius || d >= bestDist) continue;
+            bestDist = d;
+            best = { x: e.position.x, y: e.position.y, z: e.position.z, name: (e as any).name ?? wanted };
+        }
+        return best;
+    }
+
+    private findMatchingBlock(name: string, radius: number): { x: number; y: number; z: number; name: string } | null {
+        const block = this.bot.findBlock({ matching: (b: any) => b?.name?.includes(name) ?? false, maxDistance: radius });
+        if (!block) return null;
+        return { x: block.position.x, y: block.position.y, z: block.position.z, name: block.name };
+    }
+
+    private pickSearchExplorePoint(task: Extract<RuntimeTask, { type: 'search_target' }>): { x: number; y: number; z: number } | null {
+        const pos = this.bot.entity?.position;
+        if (!pos) return null;
+        const base = task.anchorPos;
+        const step = task.exploreStepDistance;
+        const ring = Math.floor(task.exploredSteps / 8) + 1;
+        const angleIndex = task.exploredSteps % 8;
+        const angle = (Math.PI * 2 * angleIndex) / 8;
+        const x = Math.round(base.x + Math.cos(angle) * step * ring);
+        const z = Math.round(base.z + Math.sin(angle) * step * ring);
+        const y = Math.round(pos.y);
+        const candidate = { x, y, z };
+        if (!this.isLikelyReachable(candidate, task.maxSearchDistance)) return null;
+        return candidate;
+    }
+
+    private distanceSq(a: { x: number; y: number; z: number }, b: { x: number; y: number; z: number }): number {
+        return Math.pow(a.x - b.x, 2) + Math.pow(a.y - b.y, 2) + Math.pow(a.z - b.z, 2);
+    }
+
+    private isLikelyReachable(targetPos: { x: number; y: number; z: number }, maxDistance: number): boolean {
+        const pos = this.bot.entity?.position;
+        if (!pos) return false;
+        const dx = targetPos.x - pos.x;
+        const dy = targetPos.y - pos.y;
+        const dz = targetPos.z - pos.z;
+        if (Math.sqrt(dx * dx + dy * dy + dz * dz) > maxDistance) return false;
+        if (Math.abs(targetPos.y - pos.y) > 12) return false;
+        const samples = 8;
+        for (let i = 1; i <= samples; i++) {
+            const t = i / samples;
+            const x = Math.round(pos.x + (targetPos.x - pos.x) * t);
+            const y = Math.round(pos.y + (targetPos.y - pos.y) * t);
+            const z = Math.round(pos.z + (targetPos.z - pos.z) * t);
+            const block = this.bot.blockAt(this.bot.entity.position.floored().offset(x - Math.floor(pos.x), y - Math.floor(pos.y), z - Math.floor(pos.z)));
+            const name = block?.name ?? '';
+            if (name.includes('lava')) return false;
+            if (name.includes('water') && i >= Math.ceil(samples / 2)) return false;
+        }
+        return true;
     }
 
     private findHostile(radius: number): any {
@@ -368,6 +1004,76 @@ Respond with JSON (no other text):
             }
         }
         return best;
+    }
+
+    private countInventoryMatches(parts: string[]): number {
+        return (this.bot.inventory?.items?.() ?? []).reduce((sum, item) => {
+            const name = ((item as any).name ?? '').toString();
+            return sum + (parts.some(part => name.includes(part)) ? item.count : 0);
+        }, 0);
+    }
+
+    private findNearbyPlayers(radius: number): Array<{ name: string; x: number; y: number; z: number; distance: number }> {
+        const pos = this.bot.entity?.position;
+        if (!pos) return [];
+        const out: Array<{ name: string; x: number; y: number; z: number; distance: number }> = [];
+        for (const [, e] of Object.entries(this.bot.entities)) {
+            if (!e || (e as any).type !== 'player') continue;
+            const name = ((e as any).username ?? (e as any).name ?? '').trim();
+            if (!name || name === this.bot.username) continue;
+            const d = pos.distanceTo(e.position);
+            if (d > radius) continue;
+            out.push({
+                name,
+                x: e.position.x.toFixed ? Number(e.position.x.toFixed(0)) : Math.round(e.position.x),
+                y: e.position.y.toFixed ? Number(e.position.y.toFixed(0)) : Math.round(e.position.y),
+                z: e.position.z.toFixed ? Number(e.position.z.toFixed(0)) : Math.round(e.position.z),
+                distance: d,
+            });
+        }
+        out.sort((a, b) => a.distance - b.distance);
+        return out.slice(0, 6);
+    }
+
+    private findNearbyEntities(radius: number, limit: number): Array<{ name: string; x: number; y: number; z: number; distance: number }> {
+        const pos = this.bot.entity?.position;
+        if (!pos) return [];
+        const out: Array<{ name: string; x: number; y: number; z: number; distance: number }> = [];
+        for (const [, e] of Object.entries(this.bot.entities)) {
+            if (!e) continue;
+            const type = (e as any).type;
+            if (type === 'player' || (e as any) === this.bot.entity) continue;
+            const name = ((e as any).name ?? type ?? 'entity').toString();
+            const d = pos.distanceTo(e.position);
+            if (d > radius) continue;
+            out.push({
+                name,
+                x: Math.round(e.position.x),
+                y: Math.round(e.position.y),
+                z: Math.round(e.position.z),
+                distance: d,
+            });
+        }
+        out.sort((a, b) => a.distance - b.distance);
+        return out.slice(0, limit);
+    }
+
+    private findNearbyBlocks(radius: number, limit: number): Array<{ name: string; x: number; y: number; z: number }> {
+        const pos = this.bot.entity?.position;
+        if (!pos) return [];
+        const seen = new Set<string>();
+        const names = ['log', 'stone', 'coal_ore', 'iron_ore', 'crafting_table', 'water'];
+        const out: Array<{ name: string; x: number; y: number; z: number }> = [];
+        for (const name of names) {
+            const block = this.bot.findBlock({ matching: (b: any) => b?.name?.includes(name) ?? false, maxDistance: radius });
+            if (!block) continue;
+            const key = `${block.position.x},${block.position.y},${block.position.z}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            out.push({ name: block.name, x: block.position.x, y: block.position.y, z: block.position.z });
+            if (out.length >= limit) break;
+        }
+        return out;
     }
 
     private findLand(radius: number): { x: number; y: number; z: number } | null {
@@ -388,16 +1094,20 @@ Respond with JSON (no other text):
         return null;
     }
 
-    private execClear(): void {
-        this._taskQueue = [];
+    private execClear(clearTasks = true): void {
+        if (clearTasks) this._taskQueue = [];
         this.bot.pathfinder?.stop();
         this.bot.clearControlStates();
     }
 
     private onEnd(): void {
         console.log('[V7] Disconnected');
-        this.execClear();
+        this.execClear(false);
         this.running = false;
+        if (this._loopTimer) {
+            clearTimeout(this._loopTimer);
+            this._loopTimer = null;
+        }
         if (this.config.autoReconnect) this.reconnect();
     }
 
@@ -419,17 +1129,8 @@ Respond with JSON (no other text):
             this.register(new EatSkill(newBot));
             this.register(new RetreatSkill(newBot));
             this.register(new CraftSkill(newBot));
-            newBot.once('spawn', () => { this._reconnectAttempts = 0; this.onSpawn(); });
-            newBot.on('end', () => this.onEnd());
-            newBot.on('error', (e: Error) => console.error(`[V7] ${e.message}`));
-            newBot.on('health', () => {
-                const hp = newBot.health;
-                if (hp < this._prevHealth && hp <= this.config.lowHealthThreshold) {
-                    newBot.pathfinder?.stop();
-                    attackNearestHostile(newBot);
-                }
-                this._prevHealth = hp;
-            });
+            this.register(new CraftChainSkill(newBot));
+            this.bindBotEvents(newBot);
         }, delay);
     }
 }

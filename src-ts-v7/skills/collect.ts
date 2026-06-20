@@ -27,7 +27,9 @@ export class CollectSkill extends BaseSkill<CollectParams> {
             const pos = this.bot.entity.position;
             const dist = pos.distanceTo(block.position);
             if (dist > 4) {
-                try { await this.bot.pathfinder.goto(new (require('mineflayer-pathfinder').goals.GoalBlock)(block.position.x, block.position.y, block.position.z)); } catch {}
+                try {
+                    await this.bot.pathfinder.goto(new (require('mineflayer-pathfinder').goals.GoalNear)(block.position.x, block.position.y, block.position.z, 2));
+                } catch {}
             }
             try { await this.bot.dig(block); } catch { continue; }
             collected++;

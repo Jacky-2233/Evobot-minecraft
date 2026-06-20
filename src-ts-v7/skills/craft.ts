@@ -43,8 +43,7 @@ export class CraftSkill extends BaseSkill<{ item: string; count?: number }> {
             if (!table) return this.result(false, 'Failed to place crafting table', 'internal_error');
         }
         try {
-            const mcData = require('minecraft-data')(this.bot.version);
-            const id = mcData.itemsByName?.[item]?.id;
+            const id = this.bot.registry?.itemsByName?.[item]?.id;
             if (!id) return this.result(false, `Unknown item: ${item}`, 'not_possible');
             const recipes = this.bot.recipesFor(id, 0, 1, table != null);
             if (!recipes?.length) return this.result(false, `No recipe for ${item}`, 'not_possible');
