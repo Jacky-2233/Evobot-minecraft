@@ -1,8 +1,8 @@
 {
   "name": "evobot-minecraft",
-  "version": "5.0.0",
-  "description": "Self-evolving Minecraft AI agent powered by mineflayer + DeepSeek",
-  "main": "bot.js",
+  "version": "7.0.0",
+  "description": "Autonomous Minecraft AI agent — mineflayer + LLM intent + runtime tasks",
+  "main": "src-ts-v7/index.ts",
   "scripts": {
     "start": "npx tsx src-ts-v7/index.ts",
     "start:v7": "npx tsx src-ts-v7/index.ts",
