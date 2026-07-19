@@ -14,3 +14,13 @@ config.json
 config.json.backup-*
 .venv-filterrepo/
 replacements.txt
+mc-api/build/
+mc-api/.gradle/
+mc-api/baritone-src/build/
+mc-api/baritone-src/.gradle/
+mc-api/baritone-src/run/
+mc-api/build.err
+mc-api/gradle.err
+mc-api/debug/
+mc-api/run/
+mc-api/.vscode/

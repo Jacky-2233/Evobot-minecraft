@@ -15,10 +15,29 @@ export interface ISkill<P = unknown> {
   cancel(): void;
 }
 
+export interface ProviderConfig {
+  baseURL: string;
+  apiKey?: string;
+  apiKeyFile?: string;
+}
+
+export interface AIConfig {
+  provider: string;
+  model: string;
+  maxTokens: number;
+  timeoutMs: number;
+  providers: Record<string, ProviderConfig>;
+  /** @deprecated legacy: unified apiKey, auto-wrapped into providers */
+  apiKey?: string;
+  /** @deprecated legacy: unified baseURL, auto-wrapped into providers */
+  baseURL?: string;
+}
+
 export interface BotConfig {
+  backend?: 'mineflayer' | 'mc-api';
   host: string; port: number; username: string; version: string; auth: 'offline' | 'microsoft';
   updateIntervalMs: number; autoReconnect: boolean;
   hungerThreshold: number; lowHealthThreshold: number; criticalHealthThreshold: number;
   stuckTimeoutMs: number;
-  ai: { apiKey: string; baseURL: string; model: string; maxTokens: number; timeoutMs: number };
+  ai: AIConfig;
 }

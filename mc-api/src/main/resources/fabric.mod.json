@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "mc_api",
+  "version": "${version}",
+  "name": "MC API",
+  "description": "Expose local Minecraft client state and controls over HTTP.",
+  "authors": [
+    "OpenCode"
+  ],
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "com.example.mcapi.McApiClient"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.16.10",
+    "minecraft": "~1.21.1",
+    "java": ">=21",
+    "fabric-api": "*"
+  }
+}

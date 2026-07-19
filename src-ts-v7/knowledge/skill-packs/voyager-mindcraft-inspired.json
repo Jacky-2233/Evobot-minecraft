@@ -1,0 +1,288 @@
+{
+  "packName": "voyager-mindcraft-inspired",
+  "version": "1.0.0",
+  "license": "MIT-compatible adapted metadata from Voyager trial1 skill descriptions",
+  "inspiredBy": [
+    "MineDojo/Voyager skill library layout",
+    "mindcraft-bots/mindcraft task/profile structure"
+  ],
+  "skills": [
+    {
+      "name": "collect_bamboo",
+      "source": "voyager_mindcraft_inspired",
+      "tags": ["resource", "plant", "early_game"],
+      "triggers": ["collect bamboo", "get bamboo", "gather bamboo", "竹子"],
+      "preconditions": ["bamboo block or item visible nearby"],
+      "steps": [
+        "scan nearby blocks for bamboo",
+        "move near bamboo",
+        "break bamboo or pick dropped items",
+        "verify bamboo count increased"
+      ],
+      "success": "inventory bamboo count increased",
+      "failures": ["no bamboo nearby", "path blocked", "items not picked up"],
+      "followups": ["report inventory", "ask whether to craft sticks or scaffolding"]
+    },
+    {
+      "name": "collect_logs_with_tool_preference",
+      "source": "voyager_mindcraft_inspired",
+      "tags": ["resource", "wood", "tool_use"],
+      "triggers": ["collect wood", "chop tree", "use axe on logs", "伐木"],
+      "preconditions": ["log visible or searchable nearby"],
+      "steps": [
+        "prefer equipping best axe in inventory",
+        "find reachable log",
+        "move within dig range",
+        "dig until inventory log count increases",
+        "if no log found, fall back to search_target log"
+      ],
+      "success": "inventory contains more logs than before command",
+      "failures": ["no reachable log", "tool missing", "path stuck", "dig interrupted"],
+      "followups": ["craft planks", "craft crafting_table", "craft wooden_pickaxe"]
+    },
+    {
+      "name": "craft_wooden_tier",
+      "source": "voyager_mindcraft_inspired",
+      "tags": ["craft", "tech_tree", "early_game"],
+      "triggers": ["make wooden pickaxe", "craft wooden tools", "木镐"],
+      "preconditions": ["logs or planks obtainable", "sticks craftable"],
+      "steps": [
+        "ensure logs exist or collect logs",
+        "craft planks",
+        "craft sticks",
+        "craft crafting_table if needed",
+        "craft wooden_pickaxe",
+        "verify inventory now contains wooden_pickaxe"
+      ],
+      "success": "inventory contains wooden_pickaxe",
+      "failures": ["missing wood", "craft table unavailable", "recipe timeout"],
+      "followups": ["collect stone", "craft stone_pickaxe"]
+    },
+    {
+      "name": "craft_stone_tier",
+      "source": "voyager_mindcraft_inspired",
+      "tags": ["craft", "tech_tree", "progression"],
+      "triggers": ["make stone pickaxe", "craft stone tools", "石镐"],
+      "preconditions": ["wooden_pickaxe available or craftable", "cobblestone reachable"],
+      "steps": [
+        "ensure wooden_pickaxe exists",
+        "collect cobblestone",
+        "craft sticks if needed",
+        "craft stone_pickaxe",
+        "verify inventory contains stone_pickaxe"
+      ],
+      "success": "inventory contains stone_pickaxe",
+      "failures": ["cannot mine stone", "missing crafting inputs", "craft timeout"],
+      "followups": ["collect coal", "collect iron ore"]
+    },
+    {
+      "name": "report_player_relative_state",
+      "source": "voyager_mindcraft_inspired",
+      "tags": ["chat", "status", "grounded_reply"],
+      "triggers": ["where am i", "report my position", "what do you have", "show your skills"],
+      "preconditions": ["player position or inventory data exists"],
+      "steps": [
+        "read actual player position if requested",
+        "read actual inventory if requested",
+        "list only grounded capabilities",
+        "avoid claiming unsupported actions"
+      ],
+      "success": "reply matches game state and implemented abilities",
+      "failures": ["hallucinated coordinates", "hallucinated inventory", "hallucinated unsupported skill"],
+      "followups": ["offer a concrete supported next action"]
+    },
+    {
+      "name": "correct_after_failure_report",
+      "source": "voyager_mindcraft_inspired",
+      "tags": ["reflection", "recovery", "feedback_loop"],
+      "triggers": ["didnt work", "didn't work", "failed", "没用", "失败了"],
+      "preconditions": ["recent failure memory exists or current task exists"],
+      "steps": [
+        "inspect recent failure memory for matching task",
+        "identify smallest corrective action",
+        "reply with a grounded retry plan",
+        "enqueue correction instead of repeating identical failing step"
+      ],
+      "success": "next action differs meaningfully from the failed one and addresses failure reason",
+      "failures": ["no failure context", "retries same broken action", "blames player without evidence"],
+      "followups": ["search target", "move closer", "report blocking reason"]
+    },
+    {
+      "name": "scan_environment_grounded",
+      "source": "voyager_mindcraft_inspired",
+      "tags": ["perception", "report", "grounding"],
+      "triggers": ["scan", "look around", "what do you see", "附近有什么"],
+      "preconditions": ["bot spawned and state readable"],
+      "steps": [
+        "list nearby players",
+        "list nearby entities",
+        "list nearby useful blocks",
+        "compress into concise grounded summary"
+      ],
+      "success": "scan summary reflects current environment objects",
+      "failures": ["empty due to stale state", "hallucinated entities"],
+      "followups": ["suggest follow/search/collect based on scan"]
+    },
+    {
+      "name": "voyager_craft_crafting_table",
+      "source": "voyager_trial1_adapted",
+      "tags": ["voyager", "craft", "early_game"],
+      "triggers": ["craft crafting table", "make crafting table", "工作台"],
+      "preconditions": ["oak planks available or oak logs available"],
+      "steps": [
+        "check whether enough planks already exist",
+        "craft planks from oak logs if needed",
+        "craft crafting_table",
+        "verify crafting_table is in inventory"
+      ],
+      "success": "inventory contains crafting_table",
+      "failures": ["missing logs/planks", "craft timeout", "recipe not reachable"],
+      "followups": ["craft wooden_pickaxe", "place crafting table nearby if complex crafting is needed"]
+    },
+    {
+      "name": "voyager_craft_wooden_pickaxe",
+      "source": "voyager_trial1_adapted",
+      "tags": ["voyager", "craft", "tool", "early_game"],
+      "triggers": ["craft wooden pickaxe", "make wooden pickaxe", "木镐"],
+      "preconditions": ["oak planks and sticks available or craftable", "crafting table available or craftable"],
+      "steps": [
+        "ensure oak planks exist",
+        "ensure sticks exist",
+        "ensure crafting_table exists and place it if required",
+        "craft wooden_pickaxe",
+        "verify inventory contains wooden_pickaxe"
+      ],
+      "success": "inventory contains wooden_pickaxe",
+      "failures": ["missing planks", "missing sticks", "missing crafting table", "craft timeout"],
+      "followups": ["mine cobblestone", "mine coal ore"]
+    },
+    {
+      "name": "voyager_craft_stone_pickaxe",
+      "source": "voyager_trial1_adapted",
+      "tags": ["voyager", "craft", "tool", "progression"],
+      "triggers": ["craft stone pickaxe", "make stone pickaxe", "石镐"],
+      "preconditions": ["cobblestone available", "sticks available", "crafting table available"],
+      "steps": [
+        "ensure cobblestone count is sufficient",
+        "ensure sticks exist",
+        "use crafting table to craft stone_pickaxe",
+        "verify inventory contains stone_pickaxe"
+      ],
+      "success": "inventory contains stone_pickaxe",
+      "failures": ["missing cobblestone", "missing sticks", "craft timeout"],
+      "followups": ["mine coal ore", "mine iron ore"]
+    },
+    {
+      "name": "voyager_mine_wood_log",
+      "source": "voyager_trial1_adapted",
+      "tags": ["voyager", "resource", "wood"],
+      "triggers": ["mine wood log", "mine oak log", "get one more log"],
+      "preconditions": ["wood logs visible or searchable nearby"],
+      "steps": [
+        "search nearby for wood log blocks",
+        "move to a reachable log",
+        "break the log",
+        "verify inventory log count increased"
+      ],
+      "success": "inventory contains more logs than before",
+      "failures": ["no reachable log", "path stuck", "log broken but not collected"],
+      "followups": ["craft oak planks and sticks", "craft crafting table"]
+    },
+    {
+      "name": "voyager_mine_ten_cobblestone",
+      "source": "voyager_trial1_adapted",
+      "tags": ["voyager", "resource", "stone"],
+      "triggers": ["mine cobblestone", "get cobblestone", "collect stone"],
+      "preconditions": ["wooden or better pickaxe available", "stone reachable nearby"],
+      "steps": [
+        "equip the best available pickaxe",
+        "search for nearby stone blocks",
+        "mine until enough cobblestone is collected",
+        "verify cobblestone count increased"
+      ],
+      "success": "inventory contains additional cobblestone",
+      "failures": ["missing pickaxe", "no reachable stone", "path blocked", "dig timeout"],
+      "followups": ["craft furnace", "craft stone_pickaxe"]
+    },
+    {
+      "name": "voyager_mine_five_coal_ores",
+      "source": "voyager_trial1_adapted",
+      "tags": ["voyager", "resource", "ore", "fuel"],
+      "triggers": ["mine coal", "get coal", "collect coal ore"],
+      "preconditions": ["wooden or better pickaxe available", "coal_ore detectable within exploration radius"],
+      "steps": [
+        "equip wooden_pickaxe or better",
+        "explore until coal_ore is found within roughly 32 blocks",
+        "mine coal ore blocks",
+        "verify coal or coal ore drops were collected"
+      ],
+      "success": "inventory coal count increased",
+      "failures": ["could not find enough coal ore", "missing pickaxe", "path stuck", "dig interrupted"],
+      "followups": ["smelt raw food", "smelt ores", "craft torches later if supported"]
+    },
+    {
+      "name": "voyager_craft_furnace",
+      "source": "voyager_trial1_adapted",
+      "tags": ["voyager", "craft", "smelting"],
+      "triggers": ["craft furnace", "make furnace", "熔炉"],
+      "preconditions": ["at least eight cobblestone available"],
+      "steps": [
+        "ensure enough cobblestone exists",
+        "craft furnace",
+        "verify furnace exists in inventory"
+      ],
+      "success": "inventory contains furnace",
+      "failures": ["missing cobblestone", "craft timeout"],
+      "followups": ["smelt raw copper", "smelt raw iron", "cook porkchops"]
+    },
+    {
+      "name": "voyager_kill_four_sheep",
+      "source": "voyager_trial1_adapted",
+      "tags": ["voyager", "combat", "food", "bed"],
+      "triggers": ["kill sheep", "collect wool", "get mutton"],
+      "preconditions": ["sheep visible or searchable nearby", "safe enough area"],
+      "steps": [
+        "search nearby for sheep",
+        "move into attack range",
+        "attack until target dies",
+        "collect dropped wool and mutton",
+        "repeat until enough drops are collected"
+      ],
+      "success": "inventory gains wool and/or mutton from sheep",
+      "failures": ["no sheep nearby", "target lost", "unsafe hostile interference"],
+      "followups": ["craft white bed", "cook mutton"]
+    },
+    {
+      "name": "voyager_eat_cooked_food",
+      "source": "voyager_trial1_adapted",
+      "tags": ["voyager", "survival", "food"],
+      "triggers": ["eat cooked porkchop", "eat cooked mutton", "eat food"],
+      "preconditions": ["cooked food exists in inventory", "food level is not full or player explicitly asked"],
+      "steps": [
+        "equip cooked food item",
+        "consume it",
+        "verify food level increases or item count decreases"
+      ],
+      "success": "food level increased or cooked food count decreased after eating",
+      "failures": ["no cooked food available", "eat action interrupted", "food already full"],
+      "followups": ["report hunger status", "cook more raw food"]
+    },
+    {
+      "name": "voyager_smelt_raw_copper",
+      "source": "voyager_trial1_adapted",
+      "tags": ["voyager", "smelting", "ore"],
+      "triggers": ["smelt raw copper", "cook copper", "铜锭"],
+      "preconditions": ["raw copper available", "furnace available", "fuel available"],
+      "steps": [
+        "place or open furnace",
+        "insert raw copper and fuel",
+        "wait for smelting to finish",
+        "collect copper ingots",
+        "verify copper ingot count increased"
+      ],
+      "success": "inventory contains more copper ingots than before",
+      "failures": ["missing furnace", "missing fuel", "missing raw copper", "smelt timeout"],
+      "followups": ["craft copper block", "report smelting success"]
+    }
+  ]
+}

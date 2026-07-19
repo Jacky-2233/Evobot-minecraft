@@ -9,9 +9,16 @@ import { EatSkill } from '../skills/eat.js';
 import { RetreatSkill, attackNearestHostile } from '../skills/retreat.js';
 import { CraftSkill } from '../skills/craft.js';
 import { CraftChainSkill, listCraftChains } from '../skills/craft-chain.js';
-import { initLLM, callLLM, getModel, setModel, listModels } from '../utils/llm.js';
+import { initLLM, callLLM, getModel, getProvider, setModel, setProviderKey, listModels } from '../utils/llm.js';
 import { isFiniteVec3 } from '../utils/nan-guard.js';
 import type { BotConfig, SkillResult } from '../types/index.js';
+import { SkillLibrary } from '../memory/skill-library.js';
+import { ExampleLibrary } from '../memory/example-library.js';
+import { FailureMemory } from '../memory/failure-memory.js';
+import { TaskPlannerContext } from '../planner/task-planner.js';
+import { captureTaskSnapshot, verifyTask } from '../planner/verifier.js';
+import { buildSubgoalPlan } from '../planner/subgoal-planner.js';
+import { createWebKnowledgeProvider, type WebKnowledgeProvider } from '../utils/web-knowledge.js';
 
 let _GoalNear: any = null;
 function getGoalNear(): any {
@@ -56,6 +63,7 @@ type RuntimeTask = {
     interruptReason?: string;
     lastError?: string;
     resumeAfterInterrupt: boolean;
+    onFoundAction?: { type: string; params: any } | null;
     retries: number;
     updatedAt: number;
 };
@@ -67,6 +75,13 @@ type GoalAssessment = {
     reason?: string;
     suggestedFallback?: string;
     updatedAt: number;
+};
+type LastFailure = {
+    taskType: string;
+    params: any;
+    detail: string;
+    failureType?: string;
+    at: number;
 };
 
 export class EvoBotV7 {
@@ -89,6 +104,12 @@ export class EvoBotV7 {
     private _lastFollowTargetSnapshot: { x: number; y: number; z: number } | null = null;
     private _lastGoalAssessment: GoalAssessment | null = null;
     private _lastSearchGoalUpdateMs = 0;
+    private _lastFailure: LastFailure | null = null;
+    private readonly _skillLibrary = new SkillLibrary();
+    private readonly _exampleLibrary = new ExampleLibrary();
+    private readonly _failureMemory = new FailureMemory();
+    private readonly _plannerContext = new TaskPlannerContext(this._skillLibrary, this._exampleLibrary, this._failureMemory);
+    private readonly _webKnowledge: WebKnowledgeProvider = createWebKnowledgeProvider();
 
     // Decision/movement pacing (prevents erratic running)
     private _lastDecisionMs = 0;
@@ -128,7 +149,13 @@ export class EvoBotV7 {
     }
 
     getModel(): string { return getModel(); }
+    getProvider(): string { return getProvider(); }
     setModel(name: string): void { setModel(name); }
+    setProviderKey(provider: string, key: string): void { setProviderKey(provider, key); }
+    hasAnyProviderKey(): boolean {
+        const providers = this.config.ai.providers || {};
+        return Object.values(providers).some((p: any) => typeof p?.apiKey === 'string' && p.apiKey.trim().length > 0);
+    }
     listModels(): string { return listModels(); }
     listCraftChains(): string { return listCraftChains(); }
     submitTask(type: string, params: any): void { this._taskQueue.push({ type, params, retries: 0 }); }
@@ -139,7 +166,7 @@ export class EvoBotV7 {
         this.applyFollowTask(player ?? '', distance, tolerance, maxDistance);
     }
     searchTarget(target: string, kind: 'entity' | 'block' = 'entity', radius = 24, maxDistance = 100, stepDistance = 12): void {
-        this.applySearchTask(target, kind, radius, maxDistance, stepDistance);
+        this.applySearchTask(target, kind, radius, maxDistance, stepDistance, this.defaultFollowupActionForSearch(target, kind));
     }
     clearRuntimeTask(): void {
         this._runtimeTask = null;
@@ -195,6 +222,18 @@ export class EvoBotV7 {
         const current = this._currentTask ? `current: ${this._currentTask.type} ${JSON.stringify(this._currentTask.params)}` : 'current: none';
         return [runtimeTask, current, queued].join('\n');
     }
+    getMemorySummary(query = ''): string {
+        const state = this.buildStatePrompt();
+        return [
+            `Skill library: ${this._skillLibrary.list()}`,
+            this._plannerContext.build(query || state, state),
+        ].join('\n');
+    }
+    async getWebKnowledgeSummary(query: string): Promise<string> {
+        const results = await this._webKnowledge.query(query);
+        if (results.length === 0) return 'Web knowledge: none or disabled';
+        return ['Web knowledge:'].concat(results.slice(0, 5).map((r) => `- ${r.source}: ${r.text}`)).join('\n');
+    }
     getStatusSummary(): string {
         const pos = this.bot.entity?.position;
         const posStr = pos ? `(${pos.x.toFixed(0)}, ${pos.y.toFixed(0)}, ${pos.z.toFixed(0)})` : '(?, ?, ?)';
@@ -216,6 +255,7 @@ export class EvoBotV7 {
             `Pos: ${posStr}`,
             `Runtime task: ${runtimeTask}`,
             `Last goal assessment: ${goalAssessment}`,
+            `Last failure: ${this._lastFailure ? `${this._lastFailure.taskType} ${this._lastFailure.failureType ?? 'unknown'} ${this._lastFailure.detail}` : 'none'}`,
             `Current task: ${current}`,
             `Queued: ${queued}`,
             `Last AI plan: ${lastPlan}`,
@@ -349,6 +389,17 @@ export class EvoBotV7 {
             console.log(`[V7] ${result.ok ? 'OK' : 'FAIL'} ${task.type}: ${result.detail}`);
             this._lastEvent = `${result.ok ? 'OK' : 'FAIL'} ${task.type}: ${result.detail}`;
             if (result.ok) {
+                this._lastFailure = null;
+            } else {
+                this._lastFailure = {
+                    taskType: task.type,
+                    params: task.params,
+                    detail: result.detail,
+                    failureType: result.failureType,
+                    at: Date.now(),
+                };
+            }
+            if (result.ok) {
                 this._taskQueue.shift();
             } else if (this.isRetryableFailure(result) && task.retries < 2) {
                 task.retries++;
@@ -394,7 +445,14 @@ export class EvoBotV7 {
             if (action.type === 'follow_player') {
                 this.applyFollowTask(action.params.player, action.params.desiredDistance ?? 12, action.params.tolerance ?? 2, action.params.maxChaseDistance ?? 100);
             } else if (action.type === 'search_target') {
-                this.applySearchTask(action.params.target, action.params.kind, action.params.radius, action.params.maxDistance, action.params.stepDistance);
+                this.applySearchTask(
+                    action.params.target,
+                    action.params.kind,
+                    action.params.radius,
+                    action.params.maxDistance,
+                    action.params.stepDistance,
+                    this.defaultFollowupActionForSearch(action.params.target, action.params.kind),
+                );
             } else {
                 this._taskQueue.push({ ...action, retries: 0 });
             }
@@ -440,7 +498,7 @@ Last event: ${this._lastEvent || 'none'}`;
         const hp = ((this.bot.health ?? 20).toFixed(0));
         const fd = ((this.bot.food ?? 20).toFixed(0));
         const ps = p ? `(${p.x.toFixed(0)},${p.y.toFixed(0)},${p.z.toFixed(0)})` : '(?,?,?)';
-        console.log(`[think] HP=${hp} FD=${fd} Pos=${ps} Q=${this._taskQueue.length} Model=${getModel()}`);
+        console.log(`[think] HP=${hp} FD=${fd} Pos=${ps} Q=${this._taskQueue.length} ${getProvider()}/${getModel()}`);
 
         const prompt = `You are EvoBot v7, a Minecraft bot. Decide the next action.
 
@@ -491,11 +549,17 @@ IMPORTANT:
             console.log(`[think] ${reply}`);
         }
 
-        if (!reply) return { type: 'wait', params: {} };
+        if (!reply) {
+            console.warn('[think] empty LLM reply, using deterministic fallback');
+            return this.buildAutonomousFallback();
+        }
 
         const defaultPlayer = this.findNearbyPlayers(48)[0]?.name ?? '';
         const intent = this.parseGenericIntent(reply, '(autonomous)', defaultPlayer);
-        if (!intent) return { type: 'wait', params: {} };
+        if (!intent) {
+            console.warn('[think] invalid LLM JSON, using deterministic fallback');
+            return this.buildAutonomousFallback();
+        }
 
         this._lastGoalAssessment = {
             userRequest: '(autonomous)',
@@ -525,11 +589,25 @@ IMPORTANT:
         // Ignore server/system messages without a username
         if (!username || username === '§') return;
 
+        const directIntent = this.parseDirectChatIntent(message, username);
+        if (directIntent) {
+            this.executeChatIntent(directIntent, message, username, '[rule]');
+            return;
+        }
+
         const state = this.buildStatePrompt();
+        const memoryContext = this._plannerContext.build(message, state);
+        const webContext = await this.getWebContextForPrompt(message);
         const prompt = `You are a Minecraft bot. A player is talking to you.
 
 Your state:
 ${state}
+
+Retrieved memory/context:
+${memoryContext}
+
+External knowledge:
+${webContext}
 
 Player <${username}>: "${message}"
 
@@ -545,6 +623,16 @@ Supported intents:
 - chat_only
 
 If the request is outside your current abilities, refuse clearly and say why.
+
+Important command phrases:
+- "come here", "here", "come", "come to me" => move_to the speaking player's current position
+- "follow me" => follow_player for the speaking player
+- "report", "status", "report my position" => chat_only status reply
+- "collect wood", "get wood", "collect logs" => collect target=log
+- "introduce yourself" => chat_only
+- If you cannot extract a safe action, return chat_only instead of malformed JSON
+- Never claim you executed a task until a skill actually succeeds; say "I'll try" or "starting" instead.
+- If the player reports failure, use recent failures to choose a corrective action.
 
 Respond with JSON only:
 {"reply":"your chat reply","intent":"chat_only","supported":true}
@@ -569,46 +657,7 @@ Respond with JSON only:
 
         const chatIntent = this.parseGenericIntent(reply, message, username);
         if (chatIntent) {
-            this._lastGoalAssessment = {
-                userRequest: message,
-                intent: chatIntent.intent,
-                confidence: chatIntent.confidence ?? 0.8,
-                supported: chatIntent.supported,
-                reason: chatIntent.reason,
-                suggestedFallback: chatIntent.fallback,
-                updatedAt: Date.now(),
-            };
-            const chatMsg = chatIntent.reply || '';
-            if (chatMsg && chatMsg !== 'wait') {
-                this.bot.chat(chatMsg);
-                console.log(`[chat] <EvoBot> ${chatMsg}`);
-                this._log('chat.jsonl', { type: 'bot_reply', to: username, reply: chatMsg, rawLLM: reply });
-            } else {
-                console.log('[chat] no reply text in JSON');
-            }
-            if (!chatIntent.supported) {
-                console.log(`[chat] refused: ${chatIntent.reason ?? 'unsupported'}`);
-                return;
-            }
-            const action = this.intentToAction(chatIntent, username);
-            if (action && action.type !== 'wait') {
-                if (action.type === 'follow_player') {
-                    this.applyFollowTask(action.params.player || username, action.params.desiredDistance ?? 12, action.params.tolerance ?? 2, action.params.maxChaseDistance ?? 100);
-                    this._taskQueue = [];
-                    console.log(`[chat] set runtime task: follow_player ${JSON.stringify(action.params)}`);
-                } else if (action.type === 'search_target') {
-                    this.applySearchTask(action.params.target, action.params.kind, action.params.radius, action.params.maxDistance, action.params.stepDistance);
-                    this._taskQueue = [];
-                    console.log(`[chat] set runtime task: search_target ${JSON.stringify(action.params)}`);
-                } else if (action.type === 'stop') {
-                    this.clearRuntimeTask();
-                    this._taskQueue = [];
-                    console.log('[chat] stopped current work');
-                } else {
-                    this._taskQueue = [{ ...action, retries: 0 }]; // replace queue (player command priority)
-                    console.log(`[chat] enqueued: ${action.type} ${JSON.stringify(action.params)}`);
-                }
-            }
+            this.executeChatIntent(chatIntent, message, username, reply);
         } else {
             // Failed to parse JSON — treat as plain text reply
             const cleanReply = reply.slice(0, 100);
@@ -618,13 +667,315 @@ Respond with JSON only:
         }
     }
 
+    private async getWebContextForPrompt(message: string): Promise<string> {
+        if (!/(what|how|why|can|recipe|craft|use|用途|怎么|为什么|能干什么|配方)/i.test(message)) return 'none';
+        try {
+            const results = await this._webKnowledge.query(message);
+            if (results.length === 0) return 'none';
+            return results.slice(0, 3).map((r) => `- ${r.source}: ${r.text}`).join('\n');
+        } catch (e) {
+            return `web query failed: ${(e as Error).message}`;
+        }
+    }
+
+    private executeChatIntent(chatIntent: any, message: string, username: string, rawReply: string): void {
+        this._lastGoalAssessment = {
+            userRequest: message,
+            intent: chatIntent.intent,
+            confidence: chatIntent.confidence ?? 0.8,
+            supported: chatIntent.supported,
+            reason: chatIntent.reason,
+            suggestedFallback: chatIntent.fallback,
+            updatedAt: Date.now(),
+        };
+        const chatMsg = chatIntent.reply || '';
+        if (chatMsg && chatMsg !== 'wait') {
+            this.bot.chat(chatMsg);
+            console.log(`[chat] <EvoBot> ${chatMsg}`);
+            this._log('chat.jsonl', { type: 'bot_reply', to: username, reply: chatMsg, rawLLM: rawReply });
+        } else {
+            console.log('[chat] no reply text in JSON');
+        }
+        if (!chatIntent.supported) {
+            console.log(`[chat] refused: ${chatIntent.reason ?? 'unsupported'}`);
+            return;
+        }
+        if (this.applyPlannerTemplate(chatIntent, message, username)) return;
+        const action = this.intentToAction(chatIntent, username);
+        if (!action || action.type === 'wait') return;
+        if (action.type === 'follow_player') {
+            this.applyFollowTask(action.params.player || username, action.params.desiredDistance ?? 12, action.params.tolerance ?? 2, action.params.maxChaseDistance ?? 100);
+            this._taskQueue = [];
+            console.log(`[chat] set runtime task: follow_player ${JSON.stringify(action.params)}`);
+        } else if (action.type === 'search_target') {
+                this.applySearchTask(
+                    action.params.target,
+                    action.params.kind,
+                    action.params.radius,
+                    action.params.maxDistance,
+                    action.params.stepDistance,
+                    this.defaultFollowupActionForSearch(action.params.target, action.params.kind),
+                );
+            this._taskQueue = [];
+            console.log(`[chat] set runtime task: search_target ${JSON.stringify(action.params)}`);
+        } else if (action.type === 'stop') {
+            this.clearRuntimeTask();
+            this._taskQueue = [];
+            console.log('[chat] stopped current work');
+        } else {
+            this._taskQueue = [{ ...action, retries: 0 }];
+            console.log(`[chat] enqueued: ${action.type} ${JSON.stringify(action.params)}`);
+        }
+    }
+
+    private applyPlannerTemplate(chatIntent: any, message: string, username: string): boolean {
+        const compact = String(message || '').toLowerCase().replace(/[!?.,]/g, ' ').replace(/\s+/g, ' ').trim();
+        const inventory = this.getInventoryCounts();
+
+        if (chatIntent.intent === 'craft_chain' && ['crafting_table', 'wooden_pickaxe', 'stone_pickaxe', 'furnace'].includes(chatIntent.item)) {
+            const plan = buildSubgoalPlan(chatIntent.item, inventory);
+            if (plan) {
+                this._taskQueue = plan.map((step) => ({ ...step, retries: 0 }));
+                console.log(`[planner] using subgoal plan for ${chatIntent.item}`);
+            } else {
+                this._taskQueue = [{ type: 'craft_chain', params: { item: chatIntent.item }, retries: 0 }];
+                console.log(`[planner] using craft_chain template for ${chatIntent.item}`);
+            }
+            return true;
+        }
+
+        if (chatIntent.intent === 'collect' && chatIntent.target === 'log') {
+            this._taskQueue = [{ type: 'collect', params: { target: 'log', count: chatIntent.count ?? 1, maxDistance: 24 }, retries: 0 }];
+            console.log('[planner] using collect-log template');
+            return true;
+        }
+
+        if (/(mine coal|get coal|collect coal ore)/.test(compact)) {
+            this._taskQueue = [{ type: 'collect', params: { target: 'coal_ore', count: 1, maxDistance: 24 }, retries: 0 }];
+            console.log('[planner] using mine-coal template');
+            return true;
+        }
+
+        if (/(mine cobblestone|get cobblestone|collect stone)/.test(compact)) {
+            this._taskQueue = [{ type: 'collect', params: { target: 'stone', count: 3, maxDistance: 24 }, retries: 0 }];
+            console.log('[planner] using mine-stone template');
+            return true;
+        }
+
+        if (/(kill sheep|collect wool|get mutton)/.test(compact)) {
+            this.applySearchTask('sheep', 'entity', 24, 100, 12, { type: 'attack_entity', params: { target: 'sheep', count: 1 } });
+            this._taskQueue = [];
+            console.log('[planner] using sheep-search template');
+            return true;
+        }
+
+        if (/(didnt work|didn't work|not working|failed|失败|没用)/.test(compact) && this._currentTask) {
+            const task = this._currentTask;
+            if (task.type === 'collect' && task.params?.target === 'log') {
+                this._taskQueue = [{ type: 'collect', params: { target: 'log', count: 1, maxDistance: 24 }, retries: 0 }];
+                console.log('[planner] retrying collect-log with wider search radius');
+                return true;
+            }
+        }
+
+        if (chatIntent.intent === 'chat_only' && /(craft wooden pickaxe|make wooden pickaxe|木镐)/.test(compact)) {
+            this._taskQueue = (buildSubgoalPlan('wooden_pickaxe', inventory) ?? [{ type: 'craft_chain', params: { item: 'wooden_pickaxe' } }]).map((step) => ({ ...step, retries: 0 }));
+            console.log('[planner] promoted chat request to wooden_pickaxe subgoal plan');
+            return true;
+        }
+
+        if (chatIntent.intent === 'chat_only' && /(craft stone pickaxe|make stone pickaxe|石镐)/.test(compact)) {
+            this._taskQueue = (buildSubgoalPlan('stone_pickaxe', inventory) ?? [{ type: 'craft_chain', params: { item: 'stone_pickaxe' } }]).map((step) => ({ ...step, retries: 0 }));
+            console.log('[planner] promoted chat request to stone_pickaxe subgoal plan');
+            return true;
+        }
+
+        if (chatIntent.intent === 'chat_only' && /(craft furnace|make furnace|熔炉)/.test(compact)) {
+            this._taskQueue = (buildSubgoalPlan('furnace', inventory) ?? [{ type: 'craft_chain', params: { item: 'furnace' } }]).map((step) => ({ ...step, retries: 0 }));
+            console.log('[planner] promoted chat request to furnace subgoal plan');
+            return true;
+        }
+
+        return false;
+    }
+
+    private planFailureRecovery(username: string): any | null {
+        const failure = this._lastFailure;
+        if (!failure) return null;
+
+        if (failure.taskType === 'collect' && failure.params?.target === 'log') {
+            return {
+                intent: 'search_target',
+                supported: true,
+                confidence: 0.95,
+                reply: 'last wood collection failed; I will search for a reachable log first',
+                target: 'log',
+                kind: 'block',
+                radius: 24,
+                maxDistance: 100,
+                stepDistance: 12,
+            };
+        }
+
+        if (failure.taskType === 'collect' && String(failure.params?.target || '').includes('stone')) {
+            return {
+                intent: 'search_target',
+                supported: true,
+                confidence: 0.95,
+                reply: 'stone collection failed; I will search for a closer reachable stone block',
+                target: 'stone',
+                kind: 'block',
+                radius: 24,
+                maxDistance: 100,
+                stepDistance: 12,
+            };
+        }
+
+        if (failure.taskType === 'collect' && String(failure.params?.target || '').includes('coal')) {
+            return {
+                intent: 'search_target',
+                supported: true,
+                confidence: 0.95,
+                reply: 'coal mining failed; I will search for a reachable coal ore vein first',
+                target: 'coal_ore',
+                kind: 'block',
+                radius: 24,
+                maxDistance: 100,
+                stepDistance: 12,
+            };
+        }
+
+        if (failure.taskType === 'craft_chain' && failure.params?.item === 'wooden_pickaxe') {
+            return {
+                intent: 'collect',
+                supported: true,
+                confidence: 0.9,
+                reply: 'crafting the wooden pickaxe failed; I will gather more logs first',
+                target: 'log',
+                count: 2,
+            };
+        }
+
+        if (failure.taskType === 'craft_chain' && failure.params?.item === 'stone_pickaxe') {
+            return {
+                intent: 'collect',
+                supported: true,
+                confidence: 0.9,
+                reply: 'crafting the stone pickaxe failed; I will collect more stone first',
+                target: 'stone',
+                count: 3,
+            };
+        }
+
+        if (failure.taskType === 'move_to') {
+            const playerPos = (this.bot.players[username] as any)?.entity?.position;
+            if (playerPos) {
+                return {
+                    intent: 'follow_player',
+                    supported: true,
+                    confidence: 0.9,
+                    reply: 'moving directly failed; I will follow you instead',
+                    player: username,
+                    distance: 4,
+                    tolerance: 2,
+                };
+            }
+        }
+
+        return {
+            intent: 'chat_only',
+            supported: true,
+            confidence: 0.8,
+            reply: `The last task failed: ${failure.taskType} (${failure.failureType ?? 'unknown'}). Give me a smaller step or let me retry differently.`,
+        };
+    }
+
+    private defaultFollowupActionForSearch(target: string, kind: 'entity' | 'block'): { type: string; params: any } | null {
+        const normalized = String(target || '').toLowerCase();
+        if (kind === 'entity') {
+            if (normalized.includes('sheep')) return { type: 'attack_entity', params: { target: 'sheep', count: 1 } };
+            if (normalized.includes('pig')) return { type: 'attack_entity', params: { target: 'pig', count: 1 } };
+        }
+        if (kind === 'block') {
+            if (normalized.includes('log')) return { type: 'collect', params: { target: 'log', count: 1, maxDistance: 24 } };
+            if (normalized.includes('coal')) return { type: 'collect', params: { target: 'coal_ore', count: 1, maxDistance: 24 } };
+            if (normalized.includes('stone') || normalized.includes('cobblestone')) return { type: 'collect', params: { target: 'stone', count: 3, maxDistance: 24 } };
+        }
+        return null;
+    }
+
+    private parseDirectChatIntent(message: string, username: string): any | null {
+        const normalized = message.trim().toLowerCase();
+        const compact = normalized.replace(/[!?.,]/g, ' ').replace(/\s+/g, ' ').trim();
+        const playerPos = (this.bot.players[username] as any)?.entity?.position;
+        if (/(^|\s)(follow me|follow)(\s|$)/.test(compact)) {
+            return { intent: 'follow_player', supported: true, reply: 'on my way', player: username, distance: 12, tolerance: 2, confidence: 0.95 };
+        }
+        if (/(^|\s)(come here|come to me|come|here)(\s|$)/.test(compact) && playerPos) {
+            return {
+                intent: 'move_to', supported: true, reply: 'coming!', confidence: 0.95,
+                x: Math.round(playerPos.x), y: Math.round(playerPos.y), z: Math.round(playerPos.z),
+            };
+        }
+        if (/(report my position|where am i)/.test(compact) && playerPos) {
+            return {
+                intent: 'chat_only', supported: true, confidence: 0.95,
+                reply: `You're at (${Math.round(playerPos.x)}, ${Math.round(playerPos.y)}, ${Math.round(playerPos.z)}).`,
+            };
+        }
+        if (/(^|\s)(report|status)(\s|$)/.test(compact)) {
+            return { intent: 'chat_only', supported: true, confidence: 0.95, reply: this.getStatusSummary().replace(/\n+/g, ' ').slice(0, 180) };
+        }
+        if (/(scan|look around|what do you see|附近有什么)/.test(compact)) {
+            return { intent: 'chat_only', supported: true, confidence: 0.95, reply: this.getScanSummary('', 16).replace(/\n+/g, ' ').slice(0, 220) };
+        }
+        if (/(collect|get|gather).*(wood|log)|woods/.test(compact)) {
+            return { intent: 'collect', supported: true, confidence: 0.9, reply: 'getting wood', target: 'log', count: 1 };
+        }
+        if (/(use|equip).*(axe)|axe/.test(compact)) {
+            const hasAxe = this.bot.inventory.items().some((item: any) => item.name.includes('axe'));
+            return {
+                intent: 'chat_only', supported: true, confidence: 0.9,
+                reply: hasAxe ? 'I will use an axe when chopping logs.' : 'I do not have an axe right now, but I can still punch logs or craft one if we have materials.',
+            };
+        }
+        if (/(didnt work|didn't work|not working|failed|失败|没用)/.test(compact)) {
+            if (this._lastFailure) {
+                const corrective = this.planFailureRecovery(username);
+                if (corrective) return corrective;
+            }
+            const memory = this._plannerContext.build(compact, this.buildStatePrompt()).replace(/\n+/g, ' ').slice(0, 160);
+            return { intent: 'chat_only', supported: true, confidence: 0.85, reply: `I see it failed. I'll use the recent failure context and try a smaller corrective step. ${memory}`.slice(0, 240) };
+        }
+        if (/(crafting table|workbench|工作台)/.test(compact)) {
+            const hasTable = this.bot.inventory.items().some((item: any) => item.name === 'crafting_table');
+            return hasTable
+                ? { intent: 'chat_only', supported: true, confidence: 0.9, reply: 'Yes, I have a crafting table.' }
+                : { intent: 'craft_chain', supported: true, confidence: 0.85, reply: 'I do not have one; I will try to make a crafting table.', item: 'crafting_table' };
+        }
+        if (/(introduce yourself|who are you)/.test(compact)) {
+            return { intent: 'chat_only', supported: true, confidence: 0.95, reply: "I'm EvoBot, a Minecraft helper bot that can follow you, collect resources, search nearby targets, and craft basic tools." };
+        }
+        const forwardMatch = compact.match(/move forward(?:\s+(\d+))?/);
+        if (forwardMatch) {
+            const distance = Number(forwardMatch[1] || 3);
+            const yaw = this.bot.entity.yaw;
+            return {
+                intent: 'move_to', supported: true, confidence: 0.85, reply: `moving forward ${distance} blocks`,
+                x: Math.round(this.bot.entity.position.x - Math.sin(yaw) * distance),
+                y: Math.round(this.bot.entity.position.y),
+                z: Math.round(this.bot.entity.position.z - Math.cos(yaw) * distance),
+            };
+        }
+        return null;
+    }
+
     /** Parse JSON action from LLM response */
     private parseAction(raw: string): { type: string; params: any; _reply?: string } | null {
-        let clean = raw.replace(/```[\w]*\n?/g, '').replace(/```/g, '').trim();
-        const m = clean.match(/\{[\s\S]*\}/);
+        const m = this.extractJsonObject(raw);
         if (!m) return null;
         try {
-            const j = JSON.parse(m[0]);
+            const j = JSON.parse(m);
             const r: any = { type: 'wait', params: {}, _reply: j.reply };
             if (j.do === 'move_to') { r.type = 'move_to'; r.params = { x: j.x, y: j.y, z: j.z, reachDistance: 2 }; }
             else if (j.do === 'follow_player') { r.type = 'follow_player'; r.params = { player: j.player, desiredDistance: j.distance ?? 12, tolerance: j.tolerance ?? 2, maxChaseDistance: j.maxDistance ?? 100 }; }
@@ -638,11 +989,10 @@ Respond with JSON only:
     }
 
     private parseGenericIntent(raw: string, message: string, defaultPlayer: string): any | null {
-        let clean = raw.replace(/```[\w]*\n?/g, '').replace(/```/g, '').trim();
-        const m = clean.match(/\{[\s\S]*\}/);
+        const m = this.extractJsonObject(raw);
         if (!m) return null;
         try {
-            const j = JSON.parse(m[0]);
+            const j = JSON.parse(m);
             return {
                 intent: j.intent ?? 'chat_only',
                 supported: j.supported !== false,
@@ -668,6 +1018,64 @@ Respond with JSON only:
         } catch {
             return null;
         }
+    }
+
+    private extractJsonObject(raw: string): string | null {
+        const clean = raw.replace(/```[\w]*\n?/g, '').replace(/```/g, '').trim();
+        const m = clean.match(/\{[\s\S]*\}/);
+        if (!m) return null;
+        const candidate = m[0].trim();
+        try {
+            JSON.parse(candidate);
+            return candidate;
+        } catch {}
+
+        let repaired = candidate
+            .replace(/[“”]/g, '"')
+            .replace(/[‘’]/g, "'")
+            .replace(/,(\s*[}\]])/g, '$1')
+            .replace(/"(-?\d+(?:\.\d+)?)"(?=\s*[},])/g, '$1')
+            .replace(/:\s*"(true|false|null)"(?=\s*[},])/gi, ': $1');
+
+        const quoteCount = (repaired.match(/"/g) || []).length;
+        if (quoteCount % 2 === 1) repaired += '"';
+
+        const openBraces = (repaired.match(/\{/g) || []).length;
+        const closeBraces = (repaired.match(/\}/g) || []).length;
+        if (closeBraces < openBraces) repaired += '}'.repeat(openBraces - closeBraces);
+
+        try {
+            JSON.parse(repaired);
+            console.warn('[json] repaired malformed LLM JSON');
+            return repaired;
+        } catch {
+            return null;
+        }
+    }
+
+    private buildAutonomousFallback(): { type: string; params: any } {
+        const nearestPlayer = this.findNearbyPlayers(24)[0];
+        if (nearestPlayer) {
+            return {
+                type: 'move_to',
+                params: { x: Math.round(nearestPlayer.x), y: Math.round(nearestPlayer.y), z: Math.round(nearestPlayer.z), reachDistance: 2 },
+            };
+        }
+        const usefulBlock = this.bot.findBlock({
+            matching: (b: any) => ['log', 'coal_ore', 'crafting_table'].some((name) => b?.name?.includes(name)),
+            maxDistance: 12,
+        });
+        if (usefulBlock) {
+            return {
+                type: 'move_to',
+                params: { x: Math.round(usefulBlock.position.x), y: Math.round(usefulBlock.position.y), z: Math.round(usefulBlock.position.z), reachDistance: 2 },
+            };
+        }
+        const p = this.bot.entity?.position;
+        if (p) {
+            return { type: 'move_to', params: { x: Math.round(p.x + 4), y: Math.round(p.y), z: Math.round(p.z), reachDistance: 2 } };
+        }
+        return { type: 'wait', params: {} };
     }
 
     private intentToAction(intent: any, username: string): { type: string; params: any } | null {
@@ -704,9 +1112,77 @@ Respond with JSON only:
             this._taskQueue = [];
             return { ok: true, detail: 'Stopped current work' };
         }
+        if (type === 'attack_entity') {
+            const beforeState = this.buildStatePrompt();
+            const beforeSnapshot = captureTaskSnapshot(this.bot);
+            const result = await this.attackNamedEntity(params);
+            const afterSnapshot = captureTaskSnapshot(this.bot);
+            const verification = verifyTask(type, params, beforeSnapshot, afterSnapshot);
+            this._failureMemory.record(type, params, result, beforeState);
+            this._log('task-results.jsonl', {
+                type,
+                params,
+                ok: result.ok,
+                detail: result.detail,
+                failureType: result.failureType,
+                verification,
+                beforeState,
+                afterState: this.buildStatePrompt(),
+            });
+            return result;
+        }
         const s = this.skills.get(type);
         if (!s) return { ok: false, detail: `Unknown skill: ${type}` };
-        return s.run(params);
+        const beforeState = this.buildStatePrompt();
+        const beforeSnapshot = captureTaskSnapshot(this.bot);
+        const result = await s.run(params);
+        const afterSnapshot = captureTaskSnapshot(this.bot);
+        const verification = verifyTask(type, params, beforeSnapshot, afterSnapshot);
+        this._failureMemory.record(type, params, result, beforeState);
+        this._log('task-results.jsonl', {
+            type,
+            params,
+            ok: result.ok,
+            detail: result.detail,
+            failureType: result.failureType,
+            verification,
+            beforeState,
+            afterState: this.buildStatePrompt(),
+        });
+        return result;
+    }
+
+    private async attackNamedEntity(params: { target: string; count?: number }): Promise<SkillResult> {
+        const targetName = String(params?.target || '').toLowerCase();
+        const desiredCount = Math.max(1, Number(params?.count || 1));
+        const beforeDrops = this.countInventoryMatches(['wool', 'mutton', targetName]);
+        let defeats = 0;
+
+        for (let i = 0; i < desiredCount; i++) {
+            const entity = this.findNearestMatchingEntityObject(targetName, 20);
+            if (!entity) {
+                return defeats > 0
+                    ? { ok: true, detail: `Attacked ${defeats}/${desiredCount} ${targetName}` }
+                    : { ok: false, detail: `No ${targetName} nearby to attack`, failureType: 'target_lost' };
+            }
+
+            try { this.bot.pathfinder?.setGoal(new (require('mineflayer-pathfinder').goals.GoalNear)(entity.position.x, entity.position.y, entity.position.z, 2), true); } catch {}
+            const start = Date.now();
+            while (Date.now() - start < 8000) {
+                const live = this.findNearestMatchingEntityObject(targetName, 6);
+                if (!live) break;
+                try { await this.bot.lookAt(live.position.offset(0, 1, 0), true); } catch {}
+                try { this.bot.attack(live as any); } catch {}
+                await this.sleep(450);
+            }
+            defeats++;
+        }
+
+        const afterDrops = this.countInventoryMatches(['wool', 'mutton', targetName]);
+        if (afterDrops <= beforeDrops && defeats === 0) {
+            return { ok: false, detail: `Tried attacking ${targetName}, but got no result`, failureType: 'target_lost' };
+        }
+        return { ok: true, detail: `Attacked ${targetName}; inventory delta=${afterDrops - beforeDrops}` };
     }
 
     private async tickRuntimeTask(): Promise<boolean> {
@@ -803,6 +1279,14 @@ Respond with JSON only:
             task.lastKnownTargetPos = { x: found.x, y: found.y, z: found.z };
             task.updatedAt = Date.now();
             this._lastEvent = `SEARCH found ${task.targetName} @ (${found.x}, ${found.y}, ${found.z})`;
+            if (task.onFoundAction && this.bot.entity.position.distanceTo(found as any) <= (task.targetKind === 'entity' ? 4 : 3.5)) {
+                const action = task.onFoundAction;
+                this.clearRuntimeTask();
+                this._taskQueue = [{ ...action, retries: 0 }];
+                console.log(`[planner] search_target found ${task.targetName}; chaining ${action.type} ${JSON.stringify(action.params)}`);
+                this._lastEvent = `SEARCH chained ${action.type} after finding ${task.targetName}`;
+                return true;
+            }
             if (this.isLikelyReachable(found, task.maxSearchDistance)) {
                 const GN = getGoalNear();
                 if (GN && (Date.now() - this._lastSearchGoalUpdateMs > 1000 || !this._lastMoveTarget || this.distanceSq(this._lastMoveTarget, found) > 4)) {
@@ -874,7 +1358,7 @@ Respond with JSON only:
         this._lastEvent = `TASK follow_player -> ${targetPlayer}`;
     }
 
-    private applySearchTask(targetName: string, targetKind: 'entity' | 'block', searchRadius: number, maxSearchDistance: number, exploreStepDistance: number): void {
+    private applySearchTask(targetName: string, targetKind: 'entity' | 'block', searchRadius: number, maxSearchDistance: number, exploreStepDistance: number, onFoundAction: { type: string; params: any } | null): void {
         const pos = this.bot.entity?.position;
         if (!pos) return;
         this._runtimeTask = {
@@ -889,6 +1373,7 @@ Respond with JSON only:
             exploredSteps: 0,
             anchorPos: { x: pos.x, y: pos.y, z: pos.z },
             resumeAfterInterrupt: true,
+            onFoundAction,
             retries: 0,
             updatedAt: Date.now(),
         };
@@ -938,6 +1423,24 @@ Respond with JSON only:
             if (d > radius || d >= bestDist) continue;
             bestDist = d;
             best = { x: e.position.x, y: e.position.y, z: e.position.z, name: (e as any).name ?? wanted };
+        }
+        return best;
+    }
+
+    private findNearestMatchingEntityObject(name: string, radius: number): any | null {
+        const pos = this.bot.entity?.position;
+        if (!pos) return null;
+        const wanted = name.toLowerCase();
+        let best: any = null;
+        let bestDist = Infinity;
+        for (const [, e] of Object.entries(this.bot.entities)) {
+            if (!e || (e as any).type === 'player') continue;
+            const ename = (((e as any).name ?? (e as any).displayName ?? '') as string).toLowerCase();
+            if (!ename.includes(wanted)) continue;
+            const d = pos.distanceTo(e.position);
+            if (d > radius || d >= bestDist) continue;
+            bestDist = d;
+            best = e;
         }
         return best;
     }
@@ -1011,6 +1514,19 @@ Respond with JSON only:
             const name = ((item as any).name ?? '').toString();
             return sum + (parts.some(part => name.includes(part)) ? item.count : 0);
         }, 0);
+    }
+
+    private getInventoryCounts(): Record<string, number> {
+        const out: Record<string, number> = {};
+        for (const item of this.bot.inventory?.items?.() ?? []) {
+            const name = ((item as any).name ?? '').toString();
+            out[name] = (out[name] ?? 0) + item.count;
+        }
+        return out;
+    }
+
+    private sleep(ms: number): Promise<void> {
+        return new Promise((resolve) => setTimeout(resolve, ms));
     }
 
     private findNearbyPlayers(radius: number): Array<{ name: string; x: number; y: number; z: number; distance: number }> {
