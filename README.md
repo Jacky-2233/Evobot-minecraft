@@ -1,11 +1,16 @@
 # EvoBot
 
-Minecraft 自主 AI Agent — v7 mineflayer + v8 mc-api 双路线
+Minecraft 自主 AI Agent — v7 mineflayer + v8 mc-api（Baritone 寻路）双路线
 
-**当前版本**:
+**当前版本: v8.0.0**
 
-- `src-ts-v7/`：mineflayer 主线，功能最完整
-- `src-ts-v8/`：mc-api 新主线，三层架构（api / interface / agent）
+| 架构 | 路径 | 后端 | 说明 |
+|------|------|------|------|
+| v7 | `src-ts-v7/` | mineflayer | 功能最完整，RAG/verifier/subgoal |  
+| v8 | `src-ts-v8/` | mc-api + Baritone | 新主线，三层分离 |  
+| mc-api | `mc-api/` | Fabric 1.21.1 | 自研客户端 API 模组，27 个接口 |  
+
+**关键能力**：原子合成 / A* 寻路 (Baritone) / 远程控制 / 附近感知 / 模组设置 / 容器操作
 
 ---
 
@@ -369,17 +374,41 @@ stop               → 停止所有工作
 
 ---
 
+## mc-api — 自研 Fabric 1.21.1 客户端 API 模组
+
+`mc-api/` 是 EvoBot 的自研后端，通过 HTTP API 暴露 Minecraft 客户端的状态和控制。
+
+**27 个接口**：
+
+| 分类 | 接口 |
+|------|------|
+| 状态 | `/api/state`, `/api/raycast`, `/api/world/time`, `/api/inventory/summary`, `/api/chat/history` |
+| 控制 | `/api/input`, `/api/look`, `/api/stop_all`, `/api/hotbar`, `/api/select_item`, `/api/chat` |
+| 动作 | `/api/move_to`, `/api/break_block`, `/api/attack_entity`, `/api/use_item`, `/api/place_block`, `/api/craft` |
+| 寻路 | `/api/path_to`（Baritone A* 寻路） |
+| 容器 | `/api/inventory/click`, `/api/craft/recipe`, `/api/container/open`, `/api/container/items`, `/api/container/move`, `/api/container/close` |
+| 媒体 | `/api/screenshot`, `/api/stream`, `/api/debug/capture` |
+
+**模组命令**：`/mcapi status`, `/mcapi toggle ...`, `/mcapi setws <url>`  
+
+**内置 Baritone 1.21.1 源码**：`mc-api/baritone-src/`
+
+---
+
 ## 项目结构
 
-```
+```text
 mc-bot-evobot/
-├── src-ts-v7/         # v7 主线 (当前开发)
-├── v5/                # v5 JavaScript 版（备用）
-├── archive/v6/        # v6 分层架构（已归档，仅参考）
-├── config.json        # 配置文件
-├── start-v7.cmd       # Windows 启动脚本
-├── package.json
-└── tsconfig.json
+├── src-ts-v7/           # v7 mineflayer 主线
+├── src-ts-v8/           # v8 mc-api 新主线（三层：api/interface/agent）
+├── mc-api/              # Fabric 1.21.1 客户端 API 模组
+│   ├── src/main/java/   # Java 源码（McApiActions, LocalHttpApiServer 等）
+│   ├── baritone-src/    # Baritone 1.21.1 完整源码
+│   └── build/libs/      # 编译产物
+├── v5/                  # v5 JavaScript 版（备用）
+├── archive/v6/          # v6 分层架构（已归档）
+├── config.json          # 配置文件（不入库）
+└── package.json
 ```
 
 ---
@@ -388,6 +417,7 @@ mc-bot-evobot/
 
 | 版本 | 位置 | 状态 | 说明 |
 |------|------|------|------|
-| v7 | `src-ts-v7/` | **当前主线** | LLM intent + runtime task + slash console |
-| v6 | `archive/v6/` | 已归档 | 分层架构参考（GoalManager/Checkpoint/Dashboard）|
-| v5 | `v5/` | 备用 | JavaScript 单文件，稳定可用 |
+| v8 | `src-ts-v8/` + `mc-api/` | **当前主线** | mc-api + Baritone 寻路 + 原子合成 + 三层架构 |
+| v7 | `src-ts-v7/` | 维护 | LLM intent + RAG + verifier + subgoal |
+| v6 | `archive/v6/` | 已归档 | 分层架构参考 |
+| v5 | `v5/` | 备用 | JavaScript 单文件 |
