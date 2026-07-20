@@ -1,4 +1,4 @@
-﻿import { McApiClient, type McApiRaycast, type McApiState, type McApiChatMessage, type McApiActionResult } from "../../src-ts-v7/utils/mc-api-client.js";
+﻿import { McApiClient, type McApiRaycast, type McApiState, type McApiChatMessage, type McApiActionResult } from "../utils/mc-api-client.js";
 
 export type { McApiState, McApiRaycast, McApiChatMessage, McApiActionResult };
 

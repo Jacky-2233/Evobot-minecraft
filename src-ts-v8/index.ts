@@ -2,7 +2,7 @@
 import path from "path";
 import readline from "readline";
 import { EvoBotV8 } from "./core/bot.js";
-import type { BotConfig } from "../src-ts-v7/types/index.js";
+import type { BotConfig } from "./types/index.js";
 
 const CONFIG_PATH = path.join(process.cwd(), "config.json");
 

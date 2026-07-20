@@ -1,12 +1,12 @@
-﻿import { initLLM, callLLM, getModel, getProvider, listModels, setModel, setProviderKey } from "../../src-ts-v7/utils/llm.js";
-import type { BotConfig } from "../../src-ts-v7/types/index.js";
+﻿import { initLLM, callLLM, getModel, getProvider, listModels, setModel, setProviderKey } from "../utils/llm.js";
+import type { BotConfig } from "../types/index.js";
 import { McController, type MoveResult, type CollectResult } from "../interface/controller.js";
-import { SkillLibrary } from "../../src-ts-v7/memory/skill-library.js";
-import { ExampleLibrary } from "../../src-ts-v7/memory/example-library.js";
-import { FailureMemory } from "../../src-ts-v7/memory/failure-memory.js";
-import { TaskPlannerContext } from "../../src-ts-v7/planner/task-planner.js";
-import { buildSubgoalPlan, type InventoryCounts } from "../../src-ts-v7/planner/subgoal-planner.js";
-import { formatRetrieved } from "../../src-ts-v7/memory/retrieval.js";
+import { SkillLibrary } from "../memory/skill-library.js";
+import { ExampleLibrary } from "../memory/example-library.js";
+import { FailureMemory } from "../memory/failure-memory.js";
+import { TaskPlannerContext } from "../planner/task-planner.js";
+import { buildSubgoalPlan, type InventoryCounts } from "../planner/subgoal-planner.js";
+import { formatRetrieved } from "../memory/retrieval.js";
 
 type TaskItem = { type: string; params: any; retries: number };
 type RuntimeTask =

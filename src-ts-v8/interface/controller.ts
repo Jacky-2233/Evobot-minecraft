@@ -1,4 +1,4 @@
-﻿import type { BotConfig } from "../../src-ts-v7/types/index.js";
+﻿import type { BotConfig } from "../types/index.js";
 import { McApiBackendApi, type McApiState } from "../api/mc-api.js";
 
 export type MoveResult = { ok: boolean; detail: string; failureType?: "stuck" | "blocked" | "timeout" | "cancelled" };
