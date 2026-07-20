@@ -15,6 +15,7 @@ config.json.backup-*
 .venv-filterrepo/
 replacements.txt
 mc-api/build/
+mc-api/bin/
 mc-api/.gradle/
 mc-api/baritone-src/build/
 mc-api/baritone-src/.gradle/
