@@ -17,6 +17,7 @@ replacements.txt
 mc-api/build/
 mc-api/bin/
 mc-api/.gradle/
+mc-api/libs/baritone-standalone-fabric-*.jar
 mc-api/baritone-src/build/
 mc-api/baritone-src/.gradle/
 mc-api/baritone-src/run/
