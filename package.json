@@ -1,11 +1,10 @@
 {
   "name": "evobot-minecraft",
   "version": "8.0.0",
-  "description": "Autonomous Minecraft AI agent — v7 mineflayer + v8 mc-api coexistence",
-  "main": "src-ts-v7/index.ts",
+  "description": "Autonomous Minecraft AI agent — v8 mc-api + Baritone mainline",
+  "main": "src-ts-v8/index.ts",
   "scripts": {
-    "start": "npx tsx src-ts-v7/index.ts",
-    "start:v7": "npx tsx src-ts-v7/index.ts",
+    "start": "npx tsx src-ts-v8/index.ts",
     "start:v8": "npx tsx src-ts-v8/index.ts",
     "start:v5": "node v5/bot.js",
     "test": "node --check v5/bot.js"
